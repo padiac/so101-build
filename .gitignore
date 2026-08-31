@@ -1,0 +1,27 @@
+# Virtualenv -- 3.8 GB, and it is platform specific anyway
+.venv-win/
+__pycache__/
+*.pyc
+
+# Recorded datasets -- 1.6 GB of video, and they contain footage of the room
+datasets/
+
+# Trained checkpoints -- 919 MB, 207 MB each
+policies/
+
+# Run logs, may contain local paths
+logs/
+
+# Reference frames grabbed from the cameras
+camera_refs/
+
+# Generated analysis images. Regenerate with the scripts in tools/.
+# Several of these are photographs of the workspace and of whoever is sitting
+# in front of the webcam, so they are deliberately not published.
+figures/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

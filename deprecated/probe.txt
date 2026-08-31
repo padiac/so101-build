@@ -1,0 +1,183 @@
+﻿.\.venv-win\Scripts\python.exe : WARNING:root:No accelerated backend detected. Using default cpu, this will be slow.
+At line:2 char:1
++ .\.venv-win\Scripts\python.exe live_probe.py --port COM8 2>&1 | Out-F ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING:root:No...s will be slow.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+WARNING:lerobot.configs.policies:Device 'cuda' is not available. Switching to 'cpu'.
+Loading weights from local directory
+WARNING:root:No accelerated backend detected. Using default cpu, this will be slow.
+WARNING:lerobot.configs.policies:Device 'cuda' is not available. Switching to 'cpu'.
+=== LIVE observation ===
+state: [ -2.07 -99.56  93.93  72.35 -90.68   2.81]
+
+joint               start       end       net      path
+shoulder_pan        -0.51     -3.24     -2.74     14.10
+shoulder_lift     -102.06    -26.65     75.41     82.77
+elbow_flex          95.11     10.87    -84.25     89.03
+wrist_flex          77.02     81.12      4.10     19.39
+wrist_roll         -91.40    -69.51     21.89     24.48
+gripper              0.49     23.53     23.04     32.46
+
+shoulder_pan    path/|net| =    5.2  <-- wanders
+shoulder_lift   path/|net| =    1.1
+elbow_flex      path/|net| =    1.1
+wrist_flex      path/|net| =    4.7  <-- wanders
+wrist_roll      path/|net| =    1.1
+gripper         path/|net| =    1.4
+WARNING:lerobot.utils.import_utils:Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8, and we attempt to load libtorchcodec
+             for each of those versions. Errors for versions not installed on
+             your system are expected; only the error for your installed FFmpeg
+             version is relevant. On Windows, ensure you've installed the
+             "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.11.0+cpu) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+
+        The following exceptions were raised as we tried to load libtorchcodec:
+        
+[start of libtorchcodec loading traceback]
+FFmpeg version 8:
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\pppad\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 390, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ~~~~~~~^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 
+'E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core8.dll' (or one of its dependencies). Try 
+using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in 
+load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: 
+E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core8.dll
+
+FFmpeg version 7:
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\pppad\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 390, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ~~~~~~~^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 
+'E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core7.dll' (or one of its dependencies). Try 
+using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in 
+load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: 
+E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core7.dll
+
+FFmpeg version 6:
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\pppad\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 390, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ~~~~~~~^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 
+'E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core6.dll' (or one of its dependencies). Try 
+using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in 
+load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: 
+E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core6.dll
+
+FFmpeg version 5:
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\pppad\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 390, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ~~~~~~~^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 
+'E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core5.dll' (or one of its dependencies). Try 
+using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in 
+load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: 
+E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core5.dll
+
+FFmpeg version 4:
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\pppad\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 390, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ~~~~~~~^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 
+'E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core4.dll' (or one of its dependencies). Try 
+using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in 
+load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "E:\Repo\so101-build\.venv-win\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: 
+E:\Repo\so101-build\.venv-win\Lib\site-packages\torchcodec\libtorchcodec_core4.dll
+[end of libtorchcodec loading traceback].
+'torchcodec' is installed but cannot be loaded (see the error above). Falling back to 'pyav' as a default decoder.
+
+=== DATASET observation (control, episode 0 frame 0) ===
+state: [-23.6  -99.65  93.93  77.63 -90.68   6.93]
+
+joint               start       end       net      path
+shoulder_pan         0.35      0.20     -0.15      0.66
+shoulder_lift     -103.57   -103.51      0.05      0.82
+elbow_flex          96.07     95.87     -0.20      1.40
+wrist_flex          77.94     78.10      0.16      0.59
+wrist_roll         -88.22    -88.45     -0.23      0.50
+gripper              8.67      8.29     -0.39      2.27
+
+shoulder_pan    path/|net| =    0.0
+shoulder_lift   path/|net| =    0.0
+elbow_flex      path/|net| =    0.0
+wrist_flex      path/|net| =    0.0
+wrist_roll      path/|net| =    0.0
+gripper         path/|net| =    inf
