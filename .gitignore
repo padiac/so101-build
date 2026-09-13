@@ -25,3 +25,14 @@ figures/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 生态调查下载的模型和数据集（15 GB），README.md 要进版本库
+survey/models/
+survey/datasets/
+survey/repos/
+
+# live-rollout runtime state, rewritten on every run
+task.txt
+task.status
+# scratch scripts
+tools/_*_tmp.sh

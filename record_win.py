@@ -13,6 +13,7 @@ import sys
 import lerobot_patch
 
 lerobot_patch.apply()
+lerobot_patch.apply_mark_bad()
 
 from lerobot.scripts.lerobot_record import main  # noqa: E402
 

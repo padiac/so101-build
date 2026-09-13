@@ -28,6 +28,13 @@ if os.environ.get("SHOW_BLOCK_BOX") == "1":
     from lerobot.rollout.strategies import core, episodic  # noqa: F401,E402  (import before patching)
     lerobot_patch.apply_block_overlay()
 
+# LIVE_TASK_FILE lets the instruction change mid-run: the inference engine reads
+# its task from an attribute on every inference, so a watcher thread can swap it
+# between two inferences without a reload. See live_task.py.
+import live_task  # noqa: E402
+
+live_task.apply()
+
 from lerobot.scripts.lerobot_rollout import main  # noqa: E402
 
 if __name__ == "__main__":

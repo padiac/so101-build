@@ -50,6 +50,9 @@ No robot needed.
 
 | script | answers |
 |---|---|
+| `audit_episodes.py` | Integrity: orphaned staging dirs, gaps in `episode_index`, meta/data/video disagreement, short episodes |
+| `renumber_episodes.py` | Closes gaps in `episode_index` and resyncs `info.json` after a crash or re-record |
+| `export_clips.py` | Cuts one reviewable mp4 per episode, cameras side by side, episode number burned in |
 | `check_take.py` | Dead time at the head, episode-length consistency, leader arm in frame |
 | `onset.py` | How long each episode sits still before motion starts |
 | `verify_detector.py` | Draws the block detector's box on every episode's opening frame |

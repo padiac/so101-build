@@ -2,9 +2,10 @@
 """
 LeRobot 健壮性补丁。
 
-两个补丁，互相独立：
+三个补丁，互相独立：
   A. enable_torque / disable_torque 加重试（舵机上电时序丢包）
   B. 丢弃 episode 开头锁存的 exit_early（按键把下一条打成 0 帧）
+  C. 录制时按 b 标记「上一条已保存的 episode 是坏的」，收工后统一删
 
 --- 补丁 A ---
 
@@ -239,3 +240,79 @@ def apply_block_overlay(hsv_lo=(18, 90, 90), hsv_hi=(38, 255, 255), verbose=True
     VU._block_overlay_patched = True
     if verbose:
         print("[lerobot_patch] block bounding box will be drawn in Rerun")
+
+
+# --- 补丁 C ---
+#
+# 背景：
+#     lerobot 的 r / 左箭头只能重录「当前这一条」。等你发现上一条录砸了
+#     （卡顿、手滑、物体没摆好），它已经 save_episode() 落盘了，而中途把它
+#     从数据集里挖掉并不安全：streaming_encoding 下它的帧已经写进正在写的
+#     mp4，从半截 mp4 里删一段不是原子操作。
+#
+#     所以这里不删，只记账：按 b 把「最后保存的那一条」的序号追加到数据集
+#     目录下的 bad_episodes.txt，收工后用 robot.ps1 drop 一次性删掉——那条
+#     路径已经有完整的校验和自动换名。
+
+BAD_FILE = "bad_episodes.txt"
+_last_saved = {"root": None, "index": None}
+
+
+def _mark_last_episode_bad() -> None:
+    """把最后保存的 episode 序号写进数据集目录下的 bad_episodes.txt。"""
+    from pathlib import Path as _P
+
+    root, idx = _last_saved["root"], _last_saved["index"]
+    if root is None or idx is None:
+        print("[bad] 还没有保存过 episode，无从标记")
+        return
+    f = _P(root) / BAD_FILE
+    prev = [ln.strip() for ln in f.read_text().splitlines() if ln.strip()] if f.exists() else []
+    if str(idx) in prev:
+        print(f"[bad] episode {idx} 已经标记过了（当前共 {len(prev)} 条）")
+        return
+    prev.append(str(idx))
+    f.write_text(chr(10).join(prev) + chr(10))
+    print(f"[bad] 标记 episode {idx} 为坏；累计 {len(prev)} 条 -> {f}")
+
+
+def apply_mark_bad(key: str = "b", verbose: bool = True) -> None:
+    """按 `key` 标记上一条已保存的 episode 为坏。"""
+    import lerobot.utils.keyboard_input as ki
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    if getattr(ki, "_mark_bad_patched", False):
+        return
+
+    # 记住最后保存的是哪一条。放在 save_episode 之后取 num_episodes-1，
+    # 因为那时计数已经加过了。
+    _orig_save = LeRobotDataset.save_episode
+
+    def save_episode(self, *a, **kw):
+        out = _orig_save(self, *a, **kw)
+        try:
+            _last_saved["root"] = self.root
+            _last_saved["index"] = self.num_episodes - 1
+        except Exception:
+            pass
+        return out
+
+    LeRobotDataset.save_episode = save_episode
+
+    # create_key_listener 是在模块全局里被 init_keyboard_listener 查到的，
+    # 所以替换模块属性就够，不需要动 init_keyboard_listener 本身。
+    _orig_listener = ki.create_key_listener
+
+    def create_key_listener(dispatch, *, controls_help: str = ""):
+        def wrapped(name: str) -> None:
+            if isinstance(name, str) and name.lower() == key:
+                _mark_last_episode_bad()
+                return
+            dispatch(name)
+
+        return _orig_listener(wrapped, controls_help=f"{controls_help}, {key}=mark last episode bad")
+
+    ki.create_key_listener = create_key_listener
+    ki._mark_bad_patched = True
+    if verbose:
+        print(f"[patch C] 录制时按 {key} 标记上一条 episode 为坏（写入 {BAD_FILE}）")

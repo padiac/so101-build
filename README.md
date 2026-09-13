@@ -36,9 +36,16 @@ logs/                  运行日志
 deprecated/            已废弃但留作记录的脚本，附说明
 ```
 
-**`policies/` 里的命名**：`act_v3_100k` 是当前在用的；带 `_OLDCAMMAP` 后缀的是
-相机映射修正之前训的，**不能用**（会喂进对调的画面）；`act_v2_chunk50_100k`
-是上一版，留着做对比。
+**模型清单见 [MODELS.md](MODELS.md)** —— 每份数据当时在录什么、哪个能用、哪个不能用。
+权威的参数表不要手抄，直接读 checkpoint：
+
+```powershell
+.\.venv-win\Scripts\python.exe tools\policy\list_models.py
+```
+
+一句话版：测指令跟随只能用 `smolvla_*`（**ACT 没有语言输入**，不管按哪个按钮都只做
+它那份数据里的那一件事）；单任务最好的是 `act_v3rand_100k`；带 `_OLDCAMMAP` 的
+是相机映射修正之前训的，**不能用**（会喂进对调的画面）。
 
 ---
 
@@ -1314,6 +1321,352 @@ batch 64 ≈ 470 MB
 
 `train_act.sh` 现在按 batch 自动缩（>=48 -> 2 worker / 预取 2）。
 另外 batch 64 在 640x480 下 **GPU 也放不下**（10 GB 差 708 MB）。
+
+---
+
+### 31. ⭐ WSL 里的 `CUDA error: unknown error` —— 先查 Windows 事件日志，不要怀疑显卡
+
+**现象**：100k 步训练跑到第 48349 步（2 小时 09 分）崩溃。
+
+```
+torch.AcceleratorError: CUDA error: unknown error
+```
+
+崩溃后 `nvidia-smi` 一切正常：47°C、空闲、驱动响应。
+
+**真正的原因在 Windows 侧**：
+
+```
+21:04:06  Microsoft-Windows-Resource-Exhaustion-Detector  Event 2004
+          vmmemWSL 消耗 15,720,484,864 字节 (14.6 GB)
+          bambu-studio.exe 1.88 GB + 1.61 GB
+          主机总内存 15.8 GB
+21:04:39  训练崩溃
+```
+
+主机虚拟内存耗尽 → WSL 的 GPU 半虚拟化层（`dxgkrnl`）先失效 →
+PyTorch 只能看到一个语焉不详的 CUDA 错误。**显卡从头到尾都是好的。**
+
+**为什么 WSL 会涨到 14.6 GB**：`.wslconfig` 里两个键写错了段。
+
+```ini
+[wsl2]
+autoMemoryReclaim=gradual   # WSL 2.1.5 在这个位置不认识它
+sparseVhd=true              # 同上
+```
+
+这两个键是 **WSL 2.2.4** 才从 `[experimental]` 移到 `[wsl2]` 的。
+本机是 **2.1.5.0**，写在 `[wsl2]` 下就是无效键（启动时有 `Unknown key` 警告，
+一直被当成噪音忽略了）。**内存自动回收从未生效**：两小时里写了 12 GB
+checkpoint、反复读数据集，page cache 只进不出。
+`memory=10GB` + `swap=8GB` 允许虚拟机涨到 18 GB。
+
+**修法**：
+
+```ini
+[wsl2]
+memory=10GB
+swap=2GB                    # 原来 8GB；上限 18 GB -> 12 GB
+
+[experimental]              # 2.1.5 只认这个位置
+autoMemoryReclaim=gradual
+sparseVhd=true
+```
+
+改完 `wsl --shutdown` 重启，`Unknown key` 警告消失即为生效。
+
+**教训**：
+
+- WSL 训练遇到 `cudaErrorUnknown`，第一件事是查 Windows 事件日志 Event 2004，
+  不是查显卡、驱动、CUDA 版本。
+- **启动时的 `Unknown key` 警告不是噪音**，它意味着那条配置根本没生效。
+- `.wslconfig` 的键在哪个段取决于 WSL 版本，跨版本抄配置会静默失效。
+- 训练期间别开吃内存的桌面程序（这次是两个 Bambu Studio，合计 3.5 GB）。
+
+**损失可控**：`save_freq=10000` 的 checkpoint 带 `training_state`，
+只丢了 8349 步（约 22 分钟）。`train_resume.sh` 现在会自动从
+`checkpoints/last` 续训并重试，且在"重启后步数没推进"时停下——
+那说明不是瞬时故障，重试只会浪费一整晚。
+
+```bash
+bash train_resume.sh /home/padiac/lerobot-train/outputs/act_so101_v3_trim_20260901_1854
+```
+
+
+---
+
+### 32. ⭐ 多任务策略的"段落感"：换指令必须先归位
+
+`robot.ps1 eval -Live` 让指令跟着 `task.txt` 走，中途换句子不用重新加载模型
+（`live_task.py`，原理是推理引擎每次推理都读一次 `self._task`）。
+
+但光换掉那个属性，人在旁边**根本看不出机械臂在执行哪条指令**。三个原因叠在一起：
+
+| 现象 | 原因 |
+|---|---|
+| 按下按钮后一两秒还在做上一件事 | 策略手里攒着一整块已经规划好的动作（`n_action_steps=50`，30fps 下 1.67 秒），队列空了才会去看指令 |
+| 新指令一上来就乱伸 | 新指令是从**上一条指令把手臂丢下的地方**开始的——半途悬在别的方块上方，训练里从来没有哪一条 episode 从那种姿态开始 |
+| 不知道到底发没发出去 | 面板只知道自己往文件里写了什么，没有任何东西回报机械臂正在执行什么 |
+
+第二条最要命：它把"策略不听指令"和"策略起点在分布外"这两件完全不同的事
+混在一起，只看机械臂是分不开的。
+
+现在换成一个三状态机（`live_task.py` 里的 `_install_engine_patch`）：
+
+```
+idle  ──按下按钮──▶  homing  ──到位──▶  running  ──按下别的按钮──▶  homing ...
+                    归位（每格 2.0 单位，容差 3.5，超时 5 秒）
+```
+
+按下按钮的那一刻就调 `engine.reset()`，把攒着的动作块直接丢掉，旧指令当场结束；
+然后把手臂开回**训练数据的起始位姿**（和 `home.py` 同一个目标，
+`LIVE_HOME_DATASET` 指到 checkpoint 自己训练用的那个数据集）；到位之后才开始新指令。
+STOP 也一样：先归位，再停住。
+
+每条指令因此有明确的开头和结尾，而且每一条都从分布内的起点开始。
+实测归位约 29 tick（30fps 下 1.0 秒）。
+
+面板多了一行状态，读的是策略端写出来的 `task.status`：
+
+```
+sent  red out
+arm: returning to start pose ...      ← 黄色
+arm: Pick the red cube out of the...  ← 绿色，这才是机械臂真正在执行的
+```
+
+两条线分开显示是有意的：**上面一行是你按了什么，下面一行是机械臂在干什么。**
+两者不一致的那一两秒，正是以前误判策略的地方。
+
+没设 `LIVE_HOME_DATASET`（或者策略是 nostate 版、帧里没有关节角）时会打印一行警告，
+退回"立刻切换、不归位"的旧行为，而不是让整个 rollout 崩掉。
+
+#### 32b. 清空 `task.txt` 不等于没有指令 —— `--task` 还在命令行上
+
+第一版把 `task.txt` 写空就算数了，结果**什么都没按机械臂照样开始干活**，
+干的还是那条旧的"把黄色方块放进碗里"。
+
+原因是 `lerobot-rollout` 的 `--task` 是**整个 run 一个字符串**，没有"什么都不做"这个取值。
+`robot.ps1` 即使在 `-Live` 模式下也照样把它的默认值传下去：
+
+```powershell
+[string]$Task = "Pick the yellow block and put it in the black bowl.",   # 第 55 行
+...
+--task="$Task"                                                          # 第 539 行
+```
+
+而 `live_task.py` 当时只在文件**非空**时才覆盖引擎的 `_task`：
+
+```python
+if _state["task"]:          # 空文件 -> None -> 不覆盖 -> 命令行的默认值原样留着
+```
+
+于是引擎带着"黄色放进碗里"出生，第一个 tick 就开始执行。
+现在改成**文件永远赢，空文件也赢**，并打印一行说明忽略了哪个 `--task`。
+
+教训：把一个"默认值"删掉,要顺着它的**所有**来源删。删了文件里的那份、
+留下命令行里的那份，症状和一份都没删完全一样。
+
+#### 32c. 做了不等于看得见
+
+归位这套东西第一版是做了的，但终端上**一行都不打**，状态只写进网页读的那个文件。
+从终端看，"归位跑了" 和 "归位根本没触发" 长得一模一样，等于没做。
+
+现在每次状态转换都打一行，带数字：
+
+```
+[live-task] patched SyncInferenceEngine.get_action
+[live-task] return-to-home pose from datasets\so101_mix1
+[live-task] ignoring --task 'Pick the yellow block...'; idle until you send an instruction
+[live-task] red out: broke off, homing (worst joint 55.0 units off)
+[live-task] home reached in 0.9s (worst 3.0); now running red out
+[live-task] STOP: broke off, homing (worst joint 50.0 units off)
+[live-task] home reached in 0.8s (worst 2.0); now idle
+```
+
+第一行是关键：它证明补丁**确实挂在了 rollout 真正构造的那个引擎类上**。
+之前的自测是往假模块里塞了个桩类，只证明了状态机的逻辑对，
+没证明它在真实进程里跑得起来 —— 而后者才是有疑问的那个。
+
+#### 32d. ⭐⭐ 归位走到一半就放弃 —— 速度按 tick 写，超时按秒写
+
+症状：归位停在一个**不是起始位姿**的地方，然后策略从那儿开始，手腕相机被撞了好几次。
+
+第一版这么写的：
+
+```python
+_HOME_STEP = 2.0        # 每 tick 最多走 2.0 单位
+_HOME_TIMEOUT_S = 5.0   # 5 秒还没到就放弃
+```
+
+这两行只有在 30 Hz 下才是自洽的。实际的控制循环带着两个相机和一个策略，
+跑出来是 **8.4 Hz**（rollout 自己会 WARN 这一行）：
+
+| 循环频率 | 5 秒超时内允许走的距离 |
+|---|---|
+| 30 Hz | 300 单位 |
+| 8.4 Hz | 84 单位 |
+
+而实测所有录制帧到起始位姿的距离：
+
+| 分位 | 距离 |
+|---|---|
+| p50 | 70 单位 |
+| p90 | 131 单位 |
+| p100 | 185 单位 |
+
+**一半以上的姿态都走不完。** 归位半途超时 → 把一个半归位的、分布外的姿态交给策略
+→ ACT 从这儿开 100 步开环 → 乱抡 → 撞相机。
+
+不变量：**任何按 tick 计量的东西，量纲长度不由你控制。**
+现在速度按秒写，每个 tick 用实测的 `dt` 换算成这一 tick 该走多远：
+
+```python
+_HOME_SPEED = 45.0        # 单位/秒，和 home.py 在 30fps 下的速率一致
+dt = min(now - _ctl["tprev"], 0.25)
+limit = min(_HOME_SPEED * dt, _HOME_MAX_STEP)
+```
+
+超时也不再是常数，而是**按这次实际要走的距离算**：`距离/速度 + 3 秒`。
+固定值要么对长距离太紧，要么松到抓不住真卡住的关节。
+
+还有一条：**超时之后不再启动策略。** 归位没走完就说明手臂在一个训练里没出现过的姿态上，
+那正是乱抡的来源。现在进 `stuck` 状态原地不动，终端和面板都会说明是哪个关节差多少，
+按 STOP 重试。
+
+#### 32f. STOP 和 FREEZE 是两件事
+
+"这一段结束了" 和 "它马上要撞上去了" 需要相反的行为，一个按钮做不了两件事：
+
+| 按钮 | 行为 | 什么时候按 |
+|---|---|---|
+| **STOP** | 先归位回起始位姿，再停住 | 这条指令做完了，想干净地收尾 |
+| **FREEZE** | 当拍停住，不归位，之后不发任何动作 | 手腕相机、桌沿、你的手，马上要挨上了 |
+
+面板上 FREEZE 是红的、在 STOP 上面。`say.py` 里打 `freeze` / `急停` / `别动` 也可以。
+FREEZE 之后按 STOP 就正常归位。
+
+之所以要单独加：原来只有 STOP，而 STOP 会先归位 —— 那正是"眼看要撞上"时最不该做的事。
+
+#### 32g. ⭐⭐ 归位的**路径**：不能一步到位，要先抬起再转手腕
+
+撞坏东西的不是"归位"这个想法，是归位的**走法**。第一版所有关节同时朝目标插值，
+在关节空间里画一条直线 —— 而这条直线会**穿过桌面，也会扫过手腕相机**。
+已经因此撞到相机、把螺丝震松了。
+
+现在分三段走，每一段只动它指名的关节，其余关节按实测位置**原地保持**：
+
+| 段 | 动的关节 | 为什么 |
+|---|---|---|
+| 1 lift | shoulder_lift, elbow_flex | 先把手臂折起来，离开桌面 |
+| 2 wrist | wrist_flex, wrist_roll | 抬起来之后再转手腕 |
+| 3 home | 全部 | 最后才摆底座回起始位姿 |
+
+每一段有自己按距离算的超时，不是整条路共用一个预算。
+自测里从"手臂压低伸出、底座转出去 120、手腕翻过来"这个最坏姿态出发，实测顺序是：
+
+```
+shoulder_lift -> elbow_flex -> wrist_roll -> shoulder_pan
+```
+
+底座是最后动的。这条顺序现在是 `tools/policy/test_live_task.py` 里的一条断言。
+
+**中间位姿可以自己录，不用猜角度**：抬多高、手腕停在哪个角度，取决于你桌上摆了什么，
+数据集里读不出来。把手臂摆到你希望它经过的姿势，然后：
+
+```powershell
+.
+obot.ps1 waypoint -Name so101_v3
+```
+
+存成 `home_waypoint.json`，前两段就走这个姿态。删掉文件就退回默认
+（默认用起始位姿自己那几个关节的值，那本来就是折起来的休息姿态）。
+
+**`home.py` 走的是同一套分段路径。** 这一点比 live 模式更要紧：
+一次 run 一条指令之后，`home.py` 是**唯一**会带着手臂横穿桌面的东西，
+而它每次 eval 开跑前都要从上一次 run 结束的姿态出发。
+`home.py --save-waypoint` 就是上面那个 `robot.ps1 waypoint`。
+
+#### 32g-2. ⭐ 真正该用的评测方式：一次 run 一条指令，30 秒到点自己结束
+
+上面这一整套"运行中换指令"，起点是把 `-Duration` 设成一个很大的数字让它一直跑，
+然后靠按钮切换。**这个前提本身就是错的。**
+
+正确的做法简单得多：
+
+```powershell
+.
+obot.ps1 eval -Name smolvla_mix1_100k -Task "Pick the red cube out of the bowl and put it on the table." -Duration 30
+```
+
+一次 run = 一次 trial。`-Duration` 默认就是 30。开跑前 `home.py` 归位，跑满 30 秒自己退出。
+抓不到就算了，下一次 run 开始前会再归位。
+
+好处不是省事，是**实验能读**：
+
+- 每条指令拿到的时间预算完全一样，不同颜色、不同模型之间可比
+- 整个 run 只有一条指令，不存在"这个动作是上一条还是这一条产生的"
+- 中途没有姿态切换，也就没有"半归位的分布外起点"，没有乱抡
+
+**不加 `-Live` 时，上面 32~32h 的所有补丁一个都不生效** ——
+`live_task.apply()` 第三行就 return 了。所以这也是一个干净的 A/B：
+怀疑是我改坏的，就去掉 `-Live` 跑一遍。
+
+#### 32g-3. ⭐ 面板改成"一次按钮 = 一次 run"
+
+`-Duration 30` 有个直接后果：**30 秒一到 rollout 就退出，再往 `task.txt` 里写什么都没人听了。**
+所以只要还是"一个长跑的 rollout + 中途换指令"这个结构，30 秒的截止和连续测试就是矛盾的。
+最早那版实现不了，不是参数没调对，是结构不对。
+
+改法：面板不再写文件，而是**每按一次就起一个新的 run**。
+
+```powershell
+.\.venv-win\Scripts\python.exe panel.py --policy policies\smolvla_mix1_100k
+```
+
+| | |
+|---|---|
+| 按一下 | 起一个 `robot.ps1 eval -Policy ... -Task ... -Duration 30` |
+| 跑的时候 | 所有按钮 disabled，显示 busy 和倒计时 |
+| 30 秒到 | 进程自己退出，按钮重新可用 |
+| 再按 | 起下一个 run，归位后重新开始 |
+
+没有 STOP，没有中断。抓不到就是这一次 trial 的答案。
+面板不传 `-Live`，所以 32~32h 那些补丁一个都不加载。
+
+倒计时是从日志里 `control loop started` 那一行开始算的，不是从进程启动开始算：
+加载 checkpoint、开两个相机、归位，上一次实测花了 7 秒，那不算 trial 的时间。
+每次 run 的日志留在 `logs/eval_<时间戳>.log`。
+
+`--stub` 用 sleep 代替真机，可以不接机械臂就把 busy 逻辑和倒计时点一遍。
+
+#### 32h. 同一个按钮按第二次，什么都没发生
+
+监视线程原来是比较**文本**变没变，一样就不推。于是"再按一次红色"是个空操作。
+最要命的场合正是归位失败之后：面板写着"按一下重试"，而重试恰好是唯一没有效果的动作。
+
+改成计写入次数（`_state["gen"]`），mtime 一变就 +1 并下推，
+状态机比较的是 `(指令, 代数)`。按同一个按钮 = 重新开始这条指令，这才是按钮该有的语义。
+
+#### 32e. 不用上机械臂就能验的自测
+
+`tools/policy/test_live_task.py` —— 真实的 `SyncInferenceEngine` 类、
+真实的 8.4 Hz 循环节奏、假的策略和假的舵机，一秒钟跑完四种情况：
+
+```
+.\.venv-win\Scripts\python.exe tools\policy	est_live_task.py
+```
+
+| 场景 | 断言 |
+|---|---|
+| 什么都没按 | 不发任何动作，`--task` 的默认值被忽略 |
+| 130 单位外按 red | 2.9 秒归位到位，残差 < 3.5，然后才跑策略 |
+| 185 单位外按 STOP | 4.2 秒归位到位，然后停住 |
+| 某个关节卡住不动 | 放弃归位，**不跑策略**，原地不动 |
+| 移动中按 FREEZE | 当拍停住，不归位，之后不再发任何动作 |
+| FREEZE 之后按 STOP | 正常归位回起始位姿 |
+
+前面那两个晚上真正浪费掉的，是"在机械臂上判断代码有没有跑"这件事本身。
+能在一秒钟里判掉的，就不该拿一个晚上去判。
 
 ---
 

@@ -34,11 +34,18 @@
 #   .\robot.ps1 eval -NoHome            # skip the homing step
 #   .\robot.ps1 eval -Record            # also save what the policy saw and did
 #   .\robot.ps1 ports                  # just show what is connected
+#   .\robot.ps1 audit -Name so101_v3                    # dataset integrity check
+#   .\robot.ps1 clips -Name so101_v3 -Episodes2 "75-81" # cut clips to review by eye
+#   .\robot.ps1 drop  -Name so101_v3 -Episodes2 "77,80" # delete episodes (add -NoSwap to review first)
+#   .\robot.ps1 progress                                # how far along is the WSL training run
+#   .\robot.ps1 log                                     # tail the training log (-Tail N)
+#   .\robot.ps1 eval -Live                              # instruction follows task.txt, changeable mid-run
 
 param(
     [Parameter(Position = 0)]
     [ValidateSet("health", "scan", "teleop", "record", "eval", "ports",
-                 "calibrate-follower", "calibrate-leader")]
+                 "calibrate-follower", "calibrate-leader",
+                 "audit", "clips", "drop", "progress", "log", "waypoint")]
     [string]$Action = "ports",
 
     [double]$MaxRel = 15,
@@ -53,6 +60,19 @@ param(
     [switch]$Fresh,
     [int]$EpisodeTime = 25,
     [int]$ResetTime = 15,
+
+    # ---- audit / clips / drop only ----
+    # Named Episodes2 because -Episodes is already an int (how many to record).
+    # Accepts "75-81", "3,7,12" or "all".
+    [string]$Episodes2 = "all",
+    [double]$ClipScale = 0.5,
+    # Named Tail rather than Lines. PowerShell variable names are case
+    # insensitive, so a parameter called Lines also types the local $lines in the
+    # usbipd helper, and every action then died with
+    # "Cannot convert System.Object[] to Int32".
+    [int]$Tail = 3,
+    [switch]$NoSwap,
+    [switch]$Live,
     # ---- eval only ----
     # Deploy a trained policy. The follower moves on its own; the leader
     # is not connected at all. Keep a hand near the power switch.
@@ -64,9 +84,20 @@ param(
     # be run against the corrected map. This points at the v2 policy, which
     # does not exist until the new dataset is recorded and trained -- until
     # then eval stops with a clear message, which is the intended behaviour.
-    [string]$Policy   = "policies\act_v2_chunk50_100k",
+    [string]$Policy   = "policies\act_v3rand_100k",
+    # Where to read the start pose from, when the checkpoint's own training copy
+    # has no local twin -- so101_c6pool_304_trim is the same recordings as
+    # datasets\so101_color6 with the instructions pooled, and only a person knows
+    # that. Whatever is named here is still checked against the checkpoint's own
+    # statistics before the arm moves, so naming the wrong one still stops.
+    [string]$HomeDataset = "",
     [int]$Duration    = 30,
     [switch]$NoHome,
+    # Rerun logs both camera streams every tick. In a short run that is free; in a
+    # long-lived session it accumulates until it hits its 1 GiB limit and then
+    # drags the whole control loop down -- measured at 6.4 Hz at the start of a
+    # session and 1.9 Hz once rerun was full, against 30 fps in training.
+    [switch]$NoDisplay,
     # -Record saves the rollout itself as a dataset: every frame the policy
     # actually saw and every action it actually issued. Without it a failed
     # run leaves nothing to examine and the next step is guesswork.
@@ -115,8 +146,25 @@ param(
 # line in an ErrorRecord and prints a NativeCommandError banner, which buries
 # the real output. Flatten stderr to plain strings instead.
 $ErrorActionPreference = "Continue"
+# Run a native command, streaming its output.
+#
+# The exit code used to be discarded here, which is how a failed
+# lerobot-edit-dataset let the caller carry on and move a good dataset out of
+# the way with nothing to put back. The code is now recorded, and callers that
+# must not proceed after a failure use Invoke-NativeStrict.
+#
+# Plain Invoke-Native still tolerates non-zero: tools/dataset/audit_episodes.py
+# deliberately exits 2 when it finds problems, and that is not a script error.
 function Invoke-Native {
     & $args[0] @($args[1..($args.Count - 1)]) 2>&1 | ForEach-Object { "$_" }
+    $script:LastNativeExit = $LASTEXITCODE
+}
+
+function Invoke-NativeStrict {
+    Invoke-Native @args
+    if ($script:LastNativeExit -ne 0) {
+        throw ($args[1..($args.Count - 1)] -join ' ') + " failed with exit code $script:LastNativeExit"
+    }
 }
 Set-Location $PSScriptRoot
 $venv = Join-Path $PSScriptRoot ".venv-win\Scripts"
@@ -357,6 +405,13 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         Write-Host "duration : $Duration s   fps $Fps   max_rel $MaxRel"
         Write-Host "device   : $Device   n_action_steps $ActionSteps (replan every $([math]::Round($ActionSteps/$Fps*1000)) ms)"
         Write-Host ""
+        # Computed here and echoed, rather than inlined into the command: the
+        # first attempt at this switch added the parameter and never wired it to
+        # the argument, so -NoDisplay ran with the rerun window still up and the
+        # comparison it existed for was meaningless.
+        $displayData = if ($NoDisplay) { "false" } else { "true" }
+        Write-Host "display  : $displayData   (rerun window)"
+        Write-Host ""
         Write-Host "THE ARM MOVES BY ITSELF. Keep a hand near the power switch." -ForegroundColor Yellow
         Write-Host ""
 
@@ -366,24 +421,79 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         # run that began anywhere else. Starting elsewhere puts the very first
         # observation out of distribution, and ACT then plays 100 open-loop
         # steps planned from it -- the arm drifts and never reaches the object.
-        if (-not $NoHome) {
-            Write-Host "=== homing to training start pose ===" -ForegroundColor Cyan
-            # Home to the pose THIS policy's training data starts from, not a
-            # hardcoded default. home.py defaulted to the v1 dataset, so every
-            # v2 evaluation began 117 units away in wrist_roll and outside the
-            # v2 start range in shoulder_pan -- out of distribution from frame
-            # one. The checkpoint records which dataset it was trained on.
-            $trainCfg = Join-Path $policyPath 'train_config.json'
-            $homeDs = 'datasets\so101_v2'
-            if (Test-Path $trainCfg) {
-                $rid = (Get-Content $trainCfg -Raw | ConvertFrom-Json).dataset.repo_id
-                if ($rid) {
-                    $name = ($rid -split '/')[-1] -replace '_trim$','' -replace '_nostate$',''
-                    $cand = Join-Path $PSScriptRoot ('datasets' + $name)
-                    if (Test-Path $cand) { $homeDs = 'datasets' + $name }
-                    else { Write-Host "no local dataset for $rid; homing with $homeDs" -ForegroundColor Yellow }
+        # Which dataset's start pose to park at is needed whether or not we park
+        # now: -Live also returns the arm here between instructions, so resolve
+        # it unconditionally. Home to the pose THIS policy's training data starts
+        # from, not a hardcoded default. home.py defaulted to the v1 dataset, so
+        # every v2 evaluation began 117 units away in wrist_roll and outside the
+        # v2 start range in shoulder_pan -- out of distribution from frame one.
+        # The checkpoint records which dataset it was trained on.
+        # There is no default. Falling back to some other task's dataset is the
+        # bug this block exists to prevent, and a fallback is how it happened
+        # twice: once from home.py's v1 default, and again on 2026-09-12, when
+        # so101_color6_304_trim found no local directory and homed to so101_v2 --
+        # wrist_roll +18 against the recorded -66, 84 units out and nowhere near
+        # the -97..-38 the training data ever saw. The wrist camera is bolted to
+        # that joint, so every rollout looked at the scene from an angle no
+        # demonstration contained. Refusing to home is recoverable; homing to the
+        # wrong pose looks like it worked.
+        $trainCfg = Join-Path $policyPath 'train_config.json'
+        $homeDs = $null
+        if ($HomeDataset) {
+            if (-not (Test-Path $HomeDataset)) {
+                Write-Host "-HomeDataset $HomeDataset does not exist" -ForegroundColor Red
+                exit 1
+            }
+            $homeDs = $HomeDataset
+        }
+        elseif (Test-Path $trainCfg) {
+            $rid = (Get-Content $trainCfg -Raw | ConvertFrom-Json).dataset.repo_id
+            if ($rid) {
+                # $dsName, not $name: PowerShell variable names are case
+                # insensitive, so assigning to $name would overwrite the -Name
+                # parameter. And the separator has to be explicit -- written as
+                # 'datasets' + $dsName it builds "datasetsso101_v3", Test-Path
+                # always fails.
+                $sep = [IO.Path]::DirectorySeparatorChar
+                $dsName = ($rid -split '/')[-1] -replace '_trim$','' -replace '_nostate$',''
+                # The training copy carries an episode count the local one does
+                # not: so101_color6_304_trim is built from datasets\so101_color6.
+                # Try the full name, then drop trailing _<digits> groups.
+                $try = $dsName
+                while ($true) {
+                    if (Test-Path (Join-Path $PSScriptRoot ('datasets' + $sep + $try))) {
+                        $homeDs = 'datasets' + $sep + $try
+                        break
+                    }
+                    if ($try -notmatch '_\d+$') { break }
+                    $try = $try -replace '_\d+$', ''
+                }
+                if (-not $homeDs) {
+                    Write-Host "no local dataset for $rid (tried $dsName down to $try)" -ForegroundColor Red
                 }
             }
+        }
+        if (-not $homeDs -and -not $NoHome) {
+            Write-Host "cannot find the data this policy was trained on, so the" -ForegroundColor Red
+            Write-Host "start pose is unknown. Copy that dataset into datasets\," -ForegroundColor Red
+            Write-Host "or pass -NoHome and place the arm yourself." -ForegroundColor Red
+            exit 1
+        }
+        # Name matching is what failed on 09-12, so do not trust it. The
+        # checkpoint carries the statistics of its own training states; a start
+        # pose outside that range is not this policy's data whatever the
+        # directory is called.
+        if ($homeDs -and -not $NoHome) {
+            & $py tools\policy\pose_in_range.py $policyPath $homeDs
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "refusing to run: the arm would start outside this" -ForegroundColor Red
+                Write-Host "policy's training range." -ForegroundColor Red
+                exit 1
+            }
+        }
+
+        if (-not $NoHome) {
+            Write-Host "=== homing to training start pose ===" -ForegroundColor Cyan
             Write-Host "homing target from: $homeDs" -ForegroundColor DarkGray
             Invoke-Native $py home.py --port $FOLLOWER --dataset $homeDs
             if ($LASTEXITCODE -eq 1) {
@@ -405,7 +515,7 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         $chunk = (Get-Content $cfgFile -Raw | ConvertFrom-Json).chunk_size
         if ($ActionSteps -gt $chunk) {
             Write-Host "n_action_steps $ActionSteps exceeds this policy's chunk_size $chunk; using $chunk" -ForegroundColor Yellow
-            $ActionSteps = $chunk
+            $ActionSteps = [int]$chunk
         }
 
         $ensembleArgs = @()
@@ -415,8 +525,46 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
 
         if ($ShowBox) { $env:SHOW_BLOCK_BOX = "1" } else { Remove-Item Env:SHOW_BLOCK_BOX -ErrorAction SilentlyContinue }
 
+        # -Live points the policy at task.txt and lets the instruction change
+        # mid-run: the inference engine re-reads its task on every inference, so a
+        # new sentence takes effect within one chunk. See live_task.py, and write
+        # to the file with say.py.
+        if ($Live) {
+            # Start with NO instruction. Seeding a default meant the arm began
+            # working the instant it started, on whatever the default happened to
+            # be -- and the default was the old put-it-in-the-bowl task. With the
+            # file empty the policy simply holds position until asked for
+            # something (live_task.py returns no action while it is blank).
+            $taskFile = Join-Path $PSScriptRoot "task.txt"
+            [IO.File]::WriteAllText($taskFile, "", (New-Object Text.UTF8Encoding($false)))
+            $env:LIVE_TASK_FILE = $taskFile
+            # A new instruction used to begin from wherever the previous one had
+            # left the arm -- mid-reach over some other cube, a pose no episode
+            # ever started from. With this set, each instruction first drives the
+            # arm back to the training start pose, so every one begins in
+            # distribution and has a visible start and end.
+            $env:LIVE_HOME_DATASET = $homeDs
+            Write-Host "live mode: idle until you send an instruction" -ForegroundColor Cyan
+            Write-Host "  buttons:  .\.venv-win\Scripts\python.exe panel.py" -ForegroundColor Cyan
+            Write-Host "  or type:  .\.venv-win\Scripts\python.exe say.py red" -ForegroundColor Cyan
+        } else {
+            Remove-Item Env:LIVE_TASK_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:LIVE_HOME_DATASET -ErrorAction SilentlyContinue
+        }
+
         $strategy = if ($Record) { "episodic" } else { "base" }
         $recordArgs = @()
+        if ($Record -and $Live) {
+            # The recorder stamps one instruction across the whole dataset, taken
+            # from -Task. In live mode the instruction changes while it runs, so
+            # the recording would carry a label that was true for none of it --
+            # and anything read back from it afterwards would be scored against
+            # the wrong colour.
+            Write-Host "-Record and -Live cannot be combined: the recording gets" -ForegroundColor Red
+            Write-Host "one instruction label, and live mode changes it mid-run." -ForegroundColor Red
+            Write-Host "Record one instruction at a time with -Task instead." -ForegroundColor Red
+            exit 1
+        }
         if ($Record) {
             $rroot = Join-Path (Join-Path $PSScriptRoot "datasets") "rollout_probe"
             if (Test-Path $rroot) { Remove-Item -Recurse -Force $rroot }
@@ -440,6 +588,19 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             )
         }
 
+        # Camera key names are a per-checkpoint convention, not a standard: the ACT
+        # policies here use top/wrist, lerobot/smolvla_base uses camera1/2/3. Derive
+        # the map from the checkpoint rather than remembering which wants which.
+        # --ps escapes the inner quotes: PowerShell strips bare ones on the way to a
+        # native command, and the resulting {a:b} parses as an empty map -- the
+        # rename silently does nothing while the startup check still passes.
+        $renameArgs = @()
+        $rn = & $py camera_rename.py $policyPath top wrist --ps 2>$null
+        if ($rn -and $rn.Trim()) {
+            $renameArgs = @("--rename_map=$($rn.Trim())")
+            Write-Host "camera rename applied (policy uses camera1/camera2)" -ForegroundColor DarkGray
+        }
+
         Invoke-Native $py rollout_win.py `
             --strategy.type=$strategy `
             --policy.path="$policyPath" `
@@ -453,9 +614,9 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             --task="$Task" `
             --fps=$Fps `
             --duration=$Duration `
-            --display_data=true `
+            --display_data=$displayData `
             --play_sounds=false `
-            @ensembleArgs @recordArgs
+            @renameArgs @ensembleArgs @recordArgs
     }
     "teleop" {
         $log = "logs\teleop_$stamp.log"
@@ -481,5 +642,120 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             Tee-Object -FilePath $log -Append
         Write-Host ""
         Write-Host "log: $log" -ForegroundColor Cyan
+    }
+    "waypoint" {
+        # Capture the pose the arm should pass THROUGH on its way home between
+        # two instructions. Straight-line joint interpolation from wherever the
+        # policy left the arm runs through the table and through the wrist
+        # camera; folding up and turning the wrist first avoids that, and where
+        # "up" is depends on what is on this desk, so it is captured rather than
+        # guessed. Move the arm there by hand (torque is off until it moves),
+        # then run this.
+        Write-Host "put the arm where it should pass through on its way home," -ForegroundColor Cyan
+        Write-Host "then this records that pose. It does not move the arm." -ForegroundColor Cyan
+        Write-Host ""
+        Invoke-NativeStrict $py home.py --port $FOLLOWER --dataset ("datasets" + [IO.Path]::DirectorySeparatorChar + $Name) --save-waypoint
+    }
+    "audit" {
+        # Cheap integrity pass. Run it after EVERY recording session: a crash
+        # leaves info.json ahead of what was written, and the failure is silent
+        # -- training just cannot load the dataset.
+        Invoke-Native $py tools/dataset/audit_episodes.py ("datasets/" + $Name)
+    }
+    "clips" {
+        # v3 packs many episodes per mp4, so there is nothing to double-click.
+        # This cuts one clip per episode, cameras side by side, with the episode
+        # number burned in so a bad take can be identified for -Action drop.
+        Invoke-Native $py tools/dataset/export_clips.py ("datasets/" + $Name) `
+            --episodes $Episodes2 --scale $ClipScale
+        $dir = Join-Path $PSScriptRoot ("datasets" + [IO.Path]::DirectorySeparatorChar + $Name + [IO.Path]::DirectorySeparatorChar + "clips")
+        Write-Host ""
+        Write-Host "clips: $dir" -ForegroundColor Cyan
+        if (Test-Path $dir) { explorer $dir }
+    }
+    "drop" {
+        # Deleting episodes is the one action here that can lose real work, so
+        # every step is checked before the previous one is disturbed:
+        #   1. the requested indices must exist in the dataset
+        #   2. lerobot-edit-dataset must exit 0 (it never edits in place; without
+        #      an explicit --new_root it writes to $HF_LEROBOT_HOME and silently
+        #      leaves the source alone)
+        #   3. the new dataset must exist and pass the audit
+        # Only then is the old version moved aside. Skipping check 2 once emptied
+        # a good dataset folder with nothing to put back.
+        if ($Episodes2 -eq "all") { throw "drop needs -Episodes2, e.g. -Episodes2 ""77,80""" }
+        $src = Join-Path $PSScriptRoot ("datasets" + [IO.Path]::DirectorySeparatorChar + $Name)
+        $dst = $src + "_kept"
+        if (-not (Test-Path (Join-Path $src "meta/info.json"))) { throw "$src is not a dataset" }
+        if (Test-Path $dst) { throw "$dst already exists -- move or delete it first" }
+
+        # "77,80" means two episodes; "77-80" means four. Expand either.
+        $ids = @()
+        foreach ($part in $Episodes2.Split(",")) {
+            $part = $part.Trim()
+            if ($part -match '^(\d+)-(\d+)$') { $ids += [int]$Matches[1]..[int]$Matches[2] }
+            else { $ids += [int]$part }
+        }
+        $ids = $ids | Sort-Object -Unique
+
+        # Check the indices exist before doing anything destructive. Asking to
+        # delete an episode that was already deleted is the common case.
+        $total = (Get-Content (Join-Path $src "meta/info.json") -Raw | ConvertFrom-Json).total_episodes
+        $bad = $ids | Where-Object { $_ -lt 0 -or $_ -ge $total }
+        if ($bad) {
+            throw ("$Name has $total episodes, numbered 0.." + ($total - 1) +                    " -- no such episode: " + ($bad -join ", "))
+        }
+        $json = "[" + ($ids -join ", ") + "]"
+        Write-Host ("deleting " + $ids.Count + " episode(s) " + $json + " from " + $Name) -ForegroundColor Yellow
+        if ($NoSwap) { Write-Host "source will be left as-is; result goes to $dst" -ForegroundColor Cyan }
+        else { Write-Host "the old version will be kept alongside as <name>_old_<timestamp>" -ForegroundColor Cyan }
+
+        Invoke-NativeStrict $py -m lerobot.scripts.lerobot_edit_dataset `
+            --repo_id ("local/" + $Name) --root $src `
+            --new_repo_id ("local/" + $Name + "_kept") --new_root $dst `
+            --operation.type delete_episodes --operation.episode_indices $json
+
+        if (-not (Test-Path (Join-Path $dst "meta/info.json"))) {
+            throw "$dst was not created -- source left untouched"
+        }
+        Write-Host ""
+        Invoke-Native $py tools/dataset/audit_episodes.py ("datasets/" + $Name + "_kept")
+        if ($script:LastNativeExit -ne 0) {
+            throw "the new dataset did not pass the audit -- source left untouched, result kept at $dst"
+        }
+        $kept = (Get-Content (Join-Path $dst "meta/info.json") -Raw | ConvertFrom-Json).total_episodes
+        if ($kept -ne ($total - $ids.Count)) {
+            throw ("expected " + ($total - $ids.Count) + " episodes, got $kept -- source left untouched")
+        }
+
+        if ($NoSwap) {
+            Write-Host ""
+            Write-Host "-NoSwap: source left as-is. Result is at $dst" -ForegroundColor Yellow
+            break
+        }
+
+        # Move the CONTENTS rather than renaming the folder. An Explorer window
+        # or a shell sitting in the dataset directory locks that directory itself
+        # but not its children, so Rename-Item fails where Move-Item succeeds.
+        $old = $src + "_old_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+        New-Item -ItemType Directory -Path $old -Force | Out-Null
+        Get-ChildItem -Force $src | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $old }
+        Get-ChildItem -Force $dst | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $src }
+        Remove-Item -LiteralPath $dst
+        Write-Host ""
+        Invoke-Native $py tools/dataset/audit_episodes.py ("datasets/" + $Name)
+        Write-Host ""
+        Write-Host ("swapped in. previous version kept at " + $old) -ForegroundColor Green
+        Write-Host "delete it once you are happy." -ForegroundColor Green
+    }
+    "progress" {
+        # Reads the checkpoint directory in WSL, not a log file, so it works
+        # from any shell and outlives whatever session launched the run.
+        wsl -d Ubuntu -- bash /mnt/e/Repo/so101-build/progress.sh
+    }
+    "log" {
+        # Read it through wsl, not \wsl$\... -- that share does not resolve
+        # reliably under mirrored networking mode, and current.log is a symlink.
+        wsl -d Ubuntu -- bash /mnt/e/Repo/so101-build/tailtrain.sh $Tail
     }
 }

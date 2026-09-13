@@ -33,11 +33,50 @@ Usage:
 
 import argparse
 import glob
+import os
 import sys
 import time
 
 import numpy as np
 import pandas as pd
+
+
+# The move home runs from wherever the last run left the arm, which is extended
+# over the table with the wrist rolled over. Driving every joint at once traces a
+# straight line in joint space, and that line goes through the table and through
+# the wrist camera -- a camera has been hit and screws shaken loose that way. So
+# fold the arm up first, then turn the wrist, and only then swing the base.
+STAGES = (
+    ("lift",  ("shoulder_lift", "elbow_flex")),
+    ("wrist", ("wrist_flex", "wrist_roll")),
+    ("home",  None),                       # None: every joint, to the start pose
+)
+
+
+def plan_stages(names, cur, tgt, waypoint=None):
+    """Each leg of the move: (label, goal pose, which joints must arrive).
+
+    Joints a leg does not name hold the position the previous leg left them in,
+    rather than tracking the live measurement, so gravity droop does not walk
+    them downward while they wait.
+    """
+    wp = np.array(tgt, dtype=float)
+    for i, n in enumerate(names):
+        if waypoint and f"{n}.pos" in waypoint:
+            wp[i] = float(waypoint[f"{n}.pos"])
+
+    plan, hold = [], np.array(cur, dtype=float)
+    for label, movers in STAGES:
+        if movers is None:
+            goal, idx = np.array(tgt, dtype=float), tuple(range(len(names)))
+        else:
+            idx = tuple(i for i, n in enumerate(names) if n in movers)
+            goal = hold.copy()
+            for i in idx:
+                goal[i] = wp[i]
+        plan.append((label, goal, idx))
+        hold = goal.copy()
+    return plan
 
 
 def target_pose(root: str):
@@ -66,9 +105,25 @@ def main() -> int:
                     help="per-joint arrival tolerance (friction and gravity droop leave ~2 units of residual, so 2.0 was too tight)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and exit without moving")
+    ap.add_argument("--save-waypoint", action="store_true",
+                    help="record the arm's CURRENT pose as the safe intermediate "
+                         "pose for live_task.py and exit without moving")
     a = ap.parse_args()
 
     tgt, starts = target_pose(a.dataset)
+
+    # Optional intermediate pose for the lift and wrist legs, captured from the
+    # arm with --save-waypoint. How high to lift and where to park the wrist
+    # depends on what is on the desk, which no dataset records.
+    waypoint = None
+    wp_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "home_waypoint.json")
+    if os.path.exists(wp_file) and not a.save_waypoint:
+        import json
+        with open(wp_file, encoding="utf-8") as f:
+            waypoint = json.load(f)
+        print("waypoint: %s" % ", ".join("%s %.0f" % (k.split(".")[0], v)
+                                         for k, v in waypoint.items()))
 
     # Torque writes drop packets during the power-on surge; lerobot_patch adds
     # retries. Every script that opens the bus needs it (README #1).
@@ -92,6 +147,27 @@ def main() -> int:
             return 1
 
         cur = np.array([obs[f"{n}.pos"] for n in names], dtype=float)
+
+        if a.save_waypoint:
+            # Between two instructions the arm is folded up and the wrist turned
+            # before the base swings, so it does not sweep the path that has
+            # already cost a wrist camera. Where "up" and "turned" are depends on
+            # what is on the desk, so it is captured from the arm: put it where
+            # it should pass through, then run this.
+            import json
+            out = {f"{n}.pos": round(float(cur[i]), 2) for i, n in enumerate(names)}
+            wp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "home_waypoint.json")
+            with open(wp, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+            print("saved waypoint to %s" % wp)
+            for n, v in out.items():
+                print("  %-16s %8.2f" % (n, v))
+            print()
+            print("live_task.py will now fold to this pose and turn the wrist here")
+            print("before swinging home. Delete the file to go back to the default.")
+            return 0
+
         print("%-15s %9s %9s %9s" % ("joint", "current", "target", "delta"))
         for i, n in enumerate(names):
             print("%-15s %9.2f %9.2f %9.2f" % (n, cur[i], tgt[i], tgt[i] - cur[i]))
@@ -104,23 +180,40 @@ def main() -> int:
             return 0
 
         dt = 1.0 / a.fps
+        speed = a.max_step * a.fps                    # units per second
         t0 = time.perf_counter()
-        while True:
-            obs = dev.get_observation()
-            cur = np.array([obs[f"{n}.pos"] for n in names], dtype=float)
-            err = tgt - cur
-            if np.abs(err).max() <= a.tol:
-                print("[OK] arrived, max residual %.2f" % np.abs(err).max())
-                return 0
-            if time.perf_counter() - t0 > a.timeout:
-                print("[!] timeout after %.0fs, max residual %.2f"
-                      % (a.timeout, np.abs(err).max()))
-                print("    Not fatal, but the policy will start slightly off-distribution.")
-                return 2
-            step = np.clip(err, -a.max_step, a.max_step)
-            goal = cur + step
-            dev.send_action({f"{n}.pos": float(goal[i]) for i, n in enumerate(names)})
-            time.sleep(dt)
+        for label, goal, idx in plan_stages(names, cur, tgt, waypoint):
+            sel = list(idx)
+            far = np.abs(goal[sel] - cur[sel]).max()
+            if far <= a.tol:
+                print("[%s] already there" % label)
+                continue
+            # Each leg gets a deadline from its own distance. One budget for the
+            # whole path is either too tight for a long move or too slack to
+            # notice a joint that is not moving at all.
+            print("[%s] %.0f units, about %.1fs" % (label, far, far / speed))
+            deadline = time.perf_counter() + far / speed + 3.0
+            while True:
+                obs = dev.get_observation()
+                cur = np.array([obs[f"{n}.pos"] for n in names], dtype=float)
+                err = goal - cur
+                if np.abs(err[sel]).max() <= a.tol:
+                    break
+                if time.perf_counter() > deadline or time.perf_counter() - t0 > a.timeout:
+                    stuck = names[sel[int(np.argmax(np.abs(err[sel])))]]
+                    print("[!] %s stalled in stage %s: %.2f units off"
+                          % (stuck, label, np.abs(err[sel]).max()))
+                    print("    Not moving further. The policy would be starting")
+                    print("    from a pose no training episode began in.")
+                    return 2
+                step = np.clip(err, -a.max_step, a.max_step)
+                dev.send_action({f"{n}.pos": float((cur + step)[i])
+                                 for i, n in enumerate(names)})
+                time.sleep(dt)
+        obs = dev.get_observation()
+        cur = np.array([obs[f"{n}.pos"] for n in names], dtype=float)
+        print("[OK] arrived, max residual %.2f" % np.abs(tgt - cur).max())
+        return 0
     finally:
         dev.disconnect()
 
