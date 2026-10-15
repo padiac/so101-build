@@ -143,6 +143,20 @@ last_step() {
     [ -n "$d" ] && basename "$d" || echo 0
 }
 
+# A full checkpoint is ~1 GB of weights plus ~2 GB of optimizer state, and this
+# run writes one every SAVE_EVERY steps. On 2026-10-15 the WSL disk filled at
+# step 20000 -- 661 GB of old runs had never been pruned -- and the run died
+# writing its checkpoint, twice. Refuse up front instead of failing an hour in.
+NEED_GB=${NEED_GB:-$(( (STEPS / SAVE_EVERY + 1) * 3 + 10 ))}
+free_gb=$(df -BG --output=avail "$BASE" | tail -1 | tr -dc 0-9)
+if [ "$free_gb" -lt "$NEED_GB" ]; then
+    say "!!! only ${free_gb} GB free under $BASE, this run needs about ${NEED_GB} GB"
+    say "    optimizer state of finished runs is safe to delete:"
+    say "    rm -rf $BASE/outputs/*/checkpoints/*/training_state   (finished runs only)"
+    exit 4
+fi
+say "disk: ${free_gb} GB free, about ${NEED_GB} GB needed"
+
 out=$BASE/outputs/diffusion_${SRC}_$(date +%Y%m%d_%H%M)
 mlog=$BASE/logs/diffusion_${SRC}_$(date +%Y%m%d_%H%M).log
 rc=1
@@ -178,6 +192,13 @@ for (( try = 1; try <= MAX_TRIES; try++ )); do
 done
 
 [ "$rc" -eq 0 ] || { say "!!! FAILED"; exit 1; }
+
+# The run is finished, so nothing will ever resume it: drop the optimizer state
+# of every checkpoint. The weights stay -- intermediate checkpoints are what the
+# training-curve measurements in MODELS.md were taken from.
+pruned=$(du -smc "$out"/checkpoints/[0-9]*/training_state 2>/dev/null | tail -1 | cut -f1)
+rm -rf "$out"/checkpoints/[0-9]*/training_state
+say "pruned ${pruned:-0} MB of optimizer state; weights kept"
 
 # The episode count goes in the name so a bigger recording never overwrites the
 # model trained on the smaller one -- they are the comparison.
