@@ -33,6 +33,7 @@
 #   bash tools/train_emptybowl.sh
 #   STEPS=50000 bash tools/train_emptybowl.sh
 #   REPREP=1 bash tools/train_emptybowl.sh      # rebuild the prepared copy
+#   RESUME_OUT=<outputs dir> bash tools/train_emptybowl.sh   # continue a dead run
 set -uo pipefail
 
 BASE=/home/padiac/lerobot-train
@@ -157,8 +158,12 @@ if [ "$free_gb" -lt "$NEED_GB" ]; then
 fi
 say "disk: ${free_gb} GB free, about ${NEED_GB} GB needed"
 
-out=$BASE/outputs/diffusion_${SRC}_$(date +%Y%m%d_%H%M)
-mlog=$BASE/logs/diffusion_${SRC}_$(date +%Y%m%d_%H%M).log
+# RESUME_OUT continues a run that died outright -- WSL shut down, the machine
+# rebooted -- rather than starting a fresh directory and losing its steps. The
+# retry loop below already resumes whenever checkpoints/last exists.
+out=${RESUME_OUT:-$BASE/outputs/diffusion_${SRC}_$(date +%Y%m%d_%H%M)}
+mlog=$BASE/logs/$(basename "$out").log
+say "output: $out"
 rc=1
 for (( try = 1; try <= MAX_TRIES; try++ )); do
     prev=$(last_step "$out" 2>/dev/null || echo 0)
