@@ -34,7 +34,15 @@ DATASETS = {
                         "pink held out",
     "so101_c6pool_304": "so101_color6_304 with the 5 instructions pooled into "
                         "one, 304 takes -- any cube counts",
+    "so101_color6_453": "named cube OUT of the bowl, 449 takes after dropping 4 still ones",
+    "so101_c6pool_453": "so101_color6_453 with the 5 instructions pooled into one",
+    "so101_emptybowl":  "take ALL six cubes out of the bowl, one fixed instruction; episode 11 is truncated and dropped in training"
 }
+
+
+# Policy types that take the instruction as an input. Everything else ignores it.
+LANGUAGE_TYPES = {"smolvla", "pi0", "pi05", "pi0_fast", "groot", "xvla",
+                  "wall_x", "evo1", "eo1", "vla_jepa"}
 
 
 def facts(d: Path) -> dict | None:
@@ -55,7 +63,8 @@ def facts(d: Path) -> dict | None:
         ds = (t.get("dataset") or {}).get("repo_id", "?")
         # local/so101_mix1_trim -> so101_mix1. The trim suffix is a processing
         # step, not a different recording.
-        r["dataset"] = ds.split("/")[-1].removesuffix("_trim").removesuffix("_nostate")
+        r["dataset"] = (ds.split("/")[-1].removesuffix("_notrim")
+                        .removesuffix("_trim").removesuffix("_nostate"))
         r["steps"] = t.get("steps", "?")
         r["batch"] = t.get("batch_size", "?")
         base = (t.get("policy") or {}).get("pretrained_path") or ""
@@ -70,7 +79,10 @@ def facts(d: Path) -> dict | None:
     # its model file, inside the licence. Whatever you type, it does the one
     # thing its dataset contains. This is the single most useful thing to know
     # before spending an evening testing instructions against one.
-    r["language"] = "no" if r["type"] == "act" else "yes"
+    # Diffusion has none either. This used to read "no if act else yes", written
+    # when ACT and SmolVLA were the only two types here; diffusion arrived later
+    # and was reported as following instructions. List the ones that do.
+    r["language"] = "yes" if r["type"] in LANGUAGE_TYPES else "no"
     return r
 
 
@@ -95,11 +107,11 @@ def main() -> int:
         return 0
 
     w = max(len(r["name"]) for r in rows)
-    print(f"{'checkpoint':<{w}}  {'type':<8}{'lang':<6}{'steps':>7}  "
+    print(f"{'checkpoint':<{w}}  {'type':<10}{'lang':<6}{'steps':>7}  "
           f"{'date':<11}{'cameras':<24}trained on")
     print("-" * (w + 76))
     for r in rows:
-        print(f"{r['name']:<{w}}  {r['type']:<8}{r['language']:<6}{str(r['steps']):>7}  "
+        print(f"{r['name']:<{w}}  {r['type']:<10}{r['language']:<6}{str(r['steps']):>7}  "
               f"{r['when']:<11}{r['cams']:<24}{r['dataset']}")
     print()
     for r in rows:

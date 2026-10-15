@@ -8,6 +8,9 @@ datasets/
 
 # Trained checkpoints -- 919 MB, 207 MB each
 policies/
+# Retired checkpoints, kept on disk in case one is needed again. See the
+# 当前状态 section of MODELS.md for what each one is and why it was retired.
+policies_archive/
 
 # Run logs, may contain local paths
 logs/
@@ -34,5 +37,8 @@ survey/repos/
 # live-rollout runtime state, rewritten on every run
 task.txt
 task.status
+# Which camera index is top and which is wrist. robot.ps1 re-detects and
+# rewrites it on every record or eval, and the indices swap between boots.
+camera_map.json
 # scratch scripts
 tools/_*_tmp.sh

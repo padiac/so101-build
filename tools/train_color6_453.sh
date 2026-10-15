@@ -49,6 +49,13 @@ MAX_TRIES=${MAX_TRIES:-4}
 FREE_MB=${FREE_MB:-3000}
 EXCLUDE="[324, 354, 393, 402]"
 EXPECT_EPISODES=449
+# Unfreeze the language side. The default recipe trains only the ~100M action
+# expert and freezes the 450M backbone; UNFREEZE=1 also trains the language model
+# (195M, minus its last layers) and the 11.8M connector that maps image features
+# into the language space, while the vision encoder stays frozen. Measured on
+# 2026-09-27: 3.62 step/s and 4.09 GB at batch 8, against 4.4 step/s frozen.
+UNFREEZE=${UNFREEZE:-0}
+START_AT=${START_AT:-}
 EVAL_SPLIT=0.1
 EVAL_EVERY=2000
 POOL_TASK="Pick a cube out of the bowl and put it on the table."
@@ -107,6 +114,23 @@ else
     say "data ready"
 fi
 
+if [ -n "$START_AT" ]; then
+    # Next occurrence of that clock time, capped: rolling to tomorrow without a
+    # cap once put a run 22 hours out, and refusing to roll once started a 00:30
+    # job at 21:32 the evening before.
+    MAX_WAIT_H=${MAX_WAIT_H:-12}
+    target=$(date -d "today $START_AT" +%s 2>/dev/null)
+    now=$(date +%s)
+    [ "$target" -le "$now" ] && target=$(date -d "tomorrow $START_AT" +%s)
+    wait_s=$(( target - now ))
+    if [ "$wait_s" -gt $(( MAX_WAIT_H * 3600 )) ]; then
+        say "$START_AT is $(( wait_s / 3600 ))h away, past the ${MAX_WAIT_H}h cap -- starting now"
+    else
+        say "waiting for $START_AT on $(date -d "@$target" '+%m-%d') (in $(( wait_s / 60 )) min)"
+        while [ "$(date +%s)" -lt "$target" ]; do sleep 30; done
+    fi
+fi
+
 waited=0
 while true; do
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
@@ -137,6 +161,7 @@ train_one() {          # $1 = dataset dir name (without _trim), $2 = publish nam
                 --dataset.root="$BASE/data/${ds}_trim" \
                 --rename_map="$RENAME" \
                 --policy.device=cuda --policy.push_to_hub=false \
+                --policy.train_expert_only=$( [ "$UNFREEZE" = "1" ] && echo false || echo true ) \
                 --policy.scheduler_decay_steps="$STEPS" \
                 --output_dir="$out" --job_name="smolvla_${ds}" \
                 --steps="$STEPS" --save_freq="$EVAL_EVERY" --log_freq=200 \
@@ -189,6 +214,7 @@ train_one() {          # $1 = dataset dir name (without _trim), $2 = publish nam
 }
 
 KSTEPS=$(( STEPS / 1000 ))k
+[ "$UNFREEZE" = "1" ] && KSTEPS="${KSTEPS}_unfrozen"
 a=0; b=0
 case "$WHICH" in
     both|colour) train_one "${SRC}_${TAG}"       "smolvla_color6_${TAG}_${KSTEPS}"; a=$? ;;

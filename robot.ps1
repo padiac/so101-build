@@ -98,6 +98,27 @@ param(
     # drags the whole control loop down -- measured at 6.4 Hz at the start of a
     # session and 1.9 Hz once rerun was full, against 30 fps in training.
     [switch]$NoDisplay,
+    # Real-time chunking is on by default for flow-matching policies; see the
+    # block that builds $rtcArgs for why. -NoRtc restores the old open-loop
+    # behaviour, which is only useful for reproducing an earlier result.
+    [switch]$NoRtc,
+    # Must be comfortably larger than the inference latency measured in control
+    # steps, or there is no blend region at all. get_prefix_weights starts with
+    # `start = min(start, end)` where start is the delay and end is this horizon,
+    # so a delay at or past the horizon collapses the ramp to nothing and leaves
+    # a hard step at every chunk boundary -- which on the arm looked like lunging
+    # at the cube and jerking back. SmolVLA takes 450-520 ms per plan here, which
+    # at 30 fps is 14-16 steps, so the documented 8-12 is below the delay on this
+    # machine. Thirty is about twice the delay and still leaves 20 of the 50-step
+    # chunk free to replan.
+    [int]$RtcHorizon = 0,
+    # Flow-matching integration steps at inference. The checkpoint ships 10 and
+    # nothing here ever changed it, which turned out to be the whole latency
+    # story: cost is about 75 ms fixed plus 35 ms a step, so 10 steps is 440 ms
+    # and 5 is 240 ms, while roughness only goes 0.485 -> 0.558. Half the delay
+    # for a seventh of the smoothness is what makes closed-loop control possible
+    # on this card at all. 0 leaves the checkpoint's own value alone.
+    [int]$FlowSteps = 5,
     # -Record saves the rollout itself as a dataset: every frame the policy
     # actually saw and every action it actually issued. Without it a failed
     # run leaves nothing to examine and the next step is guesswork.
@@ -455,7 +476,11 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
                 # 'datasets' + $dsName it builds "datasetsso101_v3", Test-Path
                 # always fails.
                 $sep = [IO.Path]::DirectorySeparatorChar
-                $dsName = ($rid -split '/')[-1] -replace '_trim$','' -replace '_nostate$',''
+                # Processing markers, not recordings: _trim (idle head cut),
+                # _notrim (prepared without that cut), _nostate. _notrim must be
+                # listed on its own -- '_trim$' does not match it, since the
+                # character before "trim" there is "o", not "_".
+                $dsName = ($rid -split '/')[-1] -replace '_notrim$','' -replace '_trim$','' -replace '_nostate$',''
                 # The training copy carries an episode count the local one does
                 # not: so101_color6_304_trim is built from datasets\so101_color6.
                 # Try the full name, then drop trailing _<digits> groups.
@@ -506,21 +531,82 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             Write-Host "homing skipped (-NoHome)" -ForegroundColor DarkGray
         }
 
-        # n_action_steps may not exceed the policy's chunk_size, which is baked
-        # into the checkpoint at training time. Different checkpoints here use
-        # different chunk sizes, so read it and clamp rather than making the
-        # user remember which is which -- passing too large a value fails deep
-        # inside the config parser with a stack trace that says nothing useful.
-        $cfgFile = Join-Path $policyPath 'config.json'
-        $chunk = (Get-Content $cfgFile -Raw | ConvertFrom-Json).chunk_size
-        if ($ActionSteps -gt $chunk) {
-            Write-Host "n_action_steps $ActionSteps exceeds this policy's chunk_size $chunk; using $chunk" -ForegroundColor Yellow
-            $ActionSteps = [int]$chunk
+        # How many actions may be executed per plan is baked into the checkpoint,
+        # and the field it lives in depends on the policy class: ACT and SmolVLA
+        # call it chunk_size, diffusion calls it horizon and additionally spends
+        # n_obs_steps-1 of it on past observations.
+        #
+        # Reading chunk_size alone gave $null for a diffusion checkpoint, and the
+        # -gt comparison against $null is true, so the clamp set n_action_steps to
+        # [int]$null = 0. The rollout then died at the first tick on "pop from an
+        # empty deque", nowhere near the cause.
+        #
+        # The default stays 50 for every policy. Taking each checkpoint's own
+        # n_action_steps instead would have quietly moved ACT from 50 to 100,
+        # and act_v3rand_100k at 50 is the one configuration on this desk that
+        # is known to finish the task. It also keeps the open-loop stretch equal
+        # across policies, so a comparison between them is about the policy.
+        $cfg = Get-Content (Join-Path $policyPath 'config.json') -Raw | ConvertFrom-Json
+        $chunk = if ($null -ne $cfg.chunk_size) { [int]$cfg.chunk_size }
+                 elseif ($null -ne $cfg.horizon) { [int]$cfg.horizon }
+                 else { 0 }
+        $nobs = if ($null -ne $cfg.n_obs_steps) { [int]$cfg.n_obs_steps } else { 1 }
+        $maxSteps = $chunk - $nobs + 1
+        if ($chunk -le 0) {
+            Write-Host "cannot tell this policy's plan length from its config" -ForegroundColor Red
+            exit 1
+        }
+        if ($ActionSteps -gt $maxSteps) {
+            Write-Host "n_action_steps $ActionSteps exceeds this policy's limit $maxSteps; using $maxSteps" -ForegroundColor Yellow
+            $ActionSteps = $maxSteps
         }
 
         $ensembleArgs = @()
         if ($Ensemble) {
             $ensembleArgs = @("--policy.temporal_ensemble_coeff=$EnsembleCoeff")
+        }
+
+        # Flow-matching policies must not run a whole chunk open loop. SmolVLA's
+        # own paper measures 82.8% execution accuracy when it replans every 10
+        # steps against 51.8% at 50, and lerobot issue #4614 reproduces the same
+        # 20-point drop on LIBERO. Fifty steps at 30 fps is 1.7 s blind, and one
+        # forward pass takes about 450 ms, so the arm is always acting on a stale
+        # picture and then jerked onto a fresh plan.
+        #
+        # Real-time chunking is the fix the docs prescribe for exactly this: a
+        # background thread keeps producing chunks while the arm moves, and each
+        # new chunk is blended onto the part already executed. It applies to
+        # flow-matching policies only -- ACT and diffusion are left alone.
+        #
+        # The horizon matters as much as switching it on: see -RtcHorizon.
+        $rtcArgs = @()
+        $isFlow = $cfg.type -in @('smolvla', 'pi0', 'pi05')
+        if ($isFlow -and $FlowSteps -gt 0) {
+            $rtcArgs += "--policy.num_steps=$FlowSteps"
+        }
+        if ($isFlow -and -not $NoRtc -and -not $Ensemble) {
+            # The horizon has to clear the inference delay or there is no blend
+            # at all: get_prefix_weights does `start = min(start, end)`, so a
+            # delay at or past the horizon flattens the ramp to a hard step and
+            # the arm lunges at every chunk boundary. That is what horizon 10
+            # did while the measured delay was 28 steps. Derive it from the
+            # delay this configuration actually has -- about 75 ms plus 35 ms
+            # per flow step, times fps -- and leave a factor of two of headroom.
+            if ($RtcHorizon -gt 0) {
+                $horizon = $RtcHorizon
+            }
+            else {
+                $steps = if ($FlowSteps -gt 0) { $FlowSteps } else { 10 }
+                $delayS = (75 + 35 * $steps) / 1000.0
+                $horizon = [math]::Min([int][math]::Ceiling($delayS * $Fps * 2), $chunk - 4)
+            }
+            $rtcArgs += @("--inference.type=rtc",
+                          "--inference.rtc.execution_horizon=$horizon",
+                          "--inference.rtc.max_guidance_weight=10.0")
+            Write-Host "real-time chunking on (horizon $horizon, flow steps $FlowSteps)" -ForegroundColor Cyan
+        }
+        elseif ($isFlow) {
+            Write-Host "real-time chunking OFF: this policy will run $ActionSteps steps open loop" -ForegroundColor Yellow
         }
 
         if ($ShowBox) { $env:SHOW_BLOCK_BOX = "1" } else { Remove-Item Env:SHOW_BLOCK_BOX -ErrorAction SilentlyContinue }
@@ -616,7 +702,7 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             --duration=$Duration `
             --display_data=$displayData `
             --play_sounds=false `
-            @renameArgs @ensembleArgs @recordArgs
+            @renameArgs @ensembleArgs @rtcArgs @recordArgs
     }
     "teleop" {
         $log = "logs\teleop_$stamp.log"
