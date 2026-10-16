@@ -1263,3 +1263,18 @@ SafetensorError: I/O error: No space left on device (os error 28)
 **检查点**：每段三个，共六个，存成落盘的定时任务，会话关掉也还在：
 03:20、06:20、08:45（Diffusion），10:50、12:50、14:50（SmolVLA）。
 挂了就续训，并按剩余时长再排三个。
+
+**结果（10-16 14:55）**：整夜没有中断。裁剪 02:00–04:35（去掉 10.1% 的静止帧），
+Diffusion 04:35–08:05（loss 0.012），SmolVLA 08:05–14:20（loss 0.069，flow matching 的 loss，和 Diffusion 不可比）。
+
+起步检查（`does_it_start.py`，12 条录像开头 × 4 次计划）：
+
+| 模型 | 计划移动量 | 会动 |
+|---|---|---|
+| diffusion_emptybowl100_100k_trim | 39.5（10-15 测是 42.7） | 100% |
+| diffusion_emptybowl130_100k_trim | 28.0 | 100% |
+| smolvla_emptybowl130_100k_trim | 81.2 | 100% |
+
+三个都能起步。移动量只在同类模型之间能比：Diffusion 每次计划只取 8 步，SmolVLA 取 50 步，
+所以 81.2 不代表 SmolVLA 动得更多。同一个模型两天测出 42.7 和 39.5，说明这个数本身就有几个单位的波动；
+130 条的 28.0 比 100 条低，但还不能下结论，要看上机。
