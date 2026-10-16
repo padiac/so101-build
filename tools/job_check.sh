@@ -24,7 +24,7 @@ now=$(date +%s)
 # Newest write by the job: its log, the prepared data, or the run's outputs.
 newest=$(stat -c %Y "$log")
 for d in "$BASE/data" "$BASE/outputs"; do
-    t=$(find "$d" -maxdepth 4 -newer "$log" -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+    t=$(find "$d" -maxdepth 7 -newer "$log" -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
     [ -n "$t" ] && [ "${t%.*}" -gt "$newest" ] && newest=${t%.*}
 done
 quiet_min=$(( (now - newest) / 60 ))
@@ -44,9 +44,17 @@ if grep -aq '\] done: ' "$log"; then
     echo "VERDICT: DONE -- $(grep -a 'publishing -> ' "$log" | tail -1 | sed 's/.*-> //')"
     exit 10
 fi
+# Checked before liveness: with two jobs queued, the second keeps a process
+# alive after the first has already given up.
+if grep -aq '\] !!! ' "$log"; then
+    echo "VERDICT: FAILED -- $(grep -a '\] !!! ' "$log" | tail -2 | tr '\n' ' ')"
+    exit 20
+fi
 if [ -z "$alive" ]; then
     echo "VERDICT: DEAD -- $(grep -aE '!!!|Error|error:' "$log" | tail -2 | tr '\n' ' ')"
-    [ -n "$out" ] && echo "resume:   RESUME_OUT=$out bash /mnt/e/Repo/so101-build/tools/train_emptybowl.sh"
+    script=train_emptybowl.sh
+    case "$(basename "$log")" in *smolvla*) script=train_emptybowl_smolvla.sh ;; esac
+    [ -n "$out" ] && echo "resume:   RESUME_OUT=$out bash /mnt/e/Repo/so101-build/tools/$script"
     exit 20
 fi
 if [ "$quiet_min" -ge "$STALL_MIN" ]; then

@@ -12,18 +12,22 @@
 # is whether that still holds when the task is six grasps in clutter instead of
 # one in the open.
 #
-# Data is whatever train_emptybowl.sh prepared: 41 episodes, the stopped-early
-# one dropped, the idle head trimmed. This script never rebuilds it.
+# Data is whatever train_emptybowl.sh prepared: the stopped-early episode
+# dropped, the idle head trimmed. This script never rebuilds it.
+#
+# 100k steps by default: on the colour data SmolVLA was still improving well
+# past 40k and only its 100k checkpoints were usable (MODELS.md).
 #
 #   bash tools/train_emptybowl_smolvla.sh
 #   STEPS=70000 DEADLINE=08:30 bash tools/train_emptybowl_smolvla.sh
+#   RESUME_OUT=<outputs dir> bash tools/train_emptybowl_smolvla.sh   # continue a dead run
 set -uo pipefail
 
 BASE=/home/padiac/lerobot-train
 WIN=/mnt/e/Repo/so101-build
 V=$BASE/.venv/bin
 SRC=so101_emptybowl
-STEPS=${STEPS:-80000}
+STEPS=${STEPS:-100000}
 BATCH=${BATCH:-8}
 SAVE_EVERY=${SAVE_EVERY:-5000}
 MAX_TRIES=${MAX_TRIES:-3}
@@ -39,6 +43,12 @@ say() { echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 
 say "=== smolvla on $SRC queued: $STEPS steps, batch $BATCH ==="
 [ -d "$BASE/data/${SRC}_trim" ] || { say "!!! $BASE/data/${SRC}_trim missing; run train_emptybowl.sh first"; exit 2; }
+
+# The episode count goes in the published name, as for diffusion, so models
+# trained on a bigger recording never overwrite the smaller one's.
+count_episodes() {
+    "$V/python" -c "import json,sys;print(json.load(open(sys.argv[1]+'/meta/info.json'))['total_episodes'])" "$1"
+}
 
 # Wait for the whole first pipeline to exit, not just its training process.
 # Keying on "is diffusion training right now" was wrong and cost a crash: that
@@ -60,6 +70,11 @@ done
 # diffusion run finished at 04:35 and this one was still waiting at 07:48.
 while pgrep -f "bin/lerobot-train" > /dev/null; do sleep 30; done
 say "the GPU is free"
+# Only now take over current.log: while queued, the diffusion run is the job
+# worth watching, and tools/job_check.sh follows whatever current.log names.
+ln -sfn "$LOG" "$BASE/logs/current.log"
+KEPT=$(count_episodes "$BASE/data/${SRC}_trim")
+say "data: $KEPT episodes in ${SRC}_trim"
 
 # Trim the plan to whatever time is left, rather than overrunning the morning.
 if [ -n "$DEADLINE" ]; then
@@ -97,8 +112,19 @@ last_step() {
     [ -n "$d" ] && basename "$d" || echo 0
 }
 
-out=$BASE/outputs/smolvla_${SRC}_$(date +%Y%m%d_%H%M)
-mlog=$BASE/logs/smolvla_${SRC}_$(date +%Y%m%d_%H%M).log
+# Same guard as train_emptybowl.sh: the 10-15 diffusion run died at step 20000
+# on a full disk. Refuse up front instead of failing hours in.
+NEED_GB=${NEED_GB:-$(( (STEPS / SAVE_EVERY + 1) * 3 + 10 ))}
+free_gb=$(df -BG --output=avail "$BASE" | tail -1 | tr -dc 0-9)
+if [ "$free_gb" -lt "$NEED_GB" ]; then
+    say "!!! only ${free_gb} GB free under $BASE, this run needs about ${NEED_GB} GB"
+    exit 4
+fi
+say "disk: ${free_gb} GB free, about ${NEED_GB} GB needed"
+
+out=${RESUME_OUT:-$BASE/outputs/smolvla_${SRC}_$(date +%Y%m%d_%H%M)}
+mlog=$BASE/logs/$(basename "$out").log
+say "output: $out"
 rc=1
 for (( try = 1; try <= MAX_TRIES; try++ )); do
     prev=$(last_step "$out" 2>/dev/null || echo 0)
@@ -134,7 +160,12 @@ done
 
 [ "$rc" -eq 0 ] || { say "!!! FAILED"; exit 1; }
 
-name=smolvla_emptybowl_$(( STEPS / 1000 ))k
+# Finished, so nothing will resume it: drop the optimizer state, keep weights.
+pruned=$(du -smc "$out"/checkpoints/[0-9]*/training_state 2>/dev/null | tail -1 | cut -f1)
+rm -rf "$out"/checkpoints/[0-9]*/training_state
+say "pruned ${pruned:-0} MB of optimizer state; weights kept"
+
+name=smolvla_emptybowl${KEPT}_$(( STEPS / 1000 ))k_trim
 say "publishing -> policies/$name"
 rm -rf "${WIN:?}/policies/$name"
 cp -r "$out/checkpoints/last/pretrained_model" "$WIN/policies/$name"
