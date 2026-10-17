@@ -686,7 +686,9 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             # deleted at the start of every run, so each recording destroyed the
             # previous one; on 2026-10-16 a one-minute run of the 100-episode
             # model was overwritten by the next run before anyone looked at it.
-            $rname = "$((Split-Path $policyPath -Leaf))_$stamp"
+            # lerobot refuses rollout datasets whose name does not start with
+            # "rollout_" (ValueError at startup).
+            $rname = "rollout_$((Split-Path $policyPath -Leaf))_$stamp"
             $rroot = Join-Path (Join-Path (Join-Path $PSScriptRoot "datasets") "rollouts") $rname
             Write-Host "recording rollout to: $rroot" -ForegroundColor Cyan
             $recordArgs = @(
