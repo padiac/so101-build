@@ -56,8 +56,16 @@ def frame(info, ep_row, key, t):
 
 
 def travel(chunk):
-    """Path length along the plan, for the joint that moves most."""
-    return float(np.abs(np.diff(chunk, axis=0)).sum(axis=0).max())
+    """How far the plan takes the arm from where it starts, for the joint that
+    goes furthest. Gripper excluded.
+
+    This used to be path length -- the sum of every step's change. That counts
+    jitter: a plan that trembles in place by a unit or two per step adds up to
+    20-30 over 50 steps, and on 2026-10-16 a model that sat still on the robot
+    scored 29 and "moves 100%". Excursion from the start does not accumulate
+    trembling: it is the distance the arm would actually travel."""
+    arm = chunk[:, :5]
+    return float(np.abs(arm - arm[0]).max())
 
 
 info = json.loads((DS / "meta" / "info.json").read_text(encoding="utf-8"))
