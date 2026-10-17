@@ -673,11 +673,15 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             exit 1
         }
         if ($Record) {
-            $rroot = Join-Path (Join-Path $PSScriptRoot "datasets") "rollout_probe"
-            if (Test-Path $rroot) { Remove-Item -Recurse -Force $rroot }
+            # One folder per run. This used to be a single rollout_probe folder
+            # deleted at the start of every run, so each recording destroyed the
+            # previous one; on 2026-10-16 a one-minute run of the 100-episode
+            # model was overwritten by the next run before anyone looked at it.
+            $rname = "$((Split-Path $policyPath -Leaf))_$stamp"
+            $rroot = Join-Path (Join-Path (Join-Path $PSScriptRoot "datasets") "rollouts") $rname
             Write-Host "recording rollout to: $rroot" -ForegroundColor Cyan
             $recordArgs = @(
-                "--dataset.repo_id=local/rollout_probe",
+                "--dataset.repo_id=local/$rname",
                 "--dataset.root=$rroot",
                 "--dataset.single_task=$Task",
                 "--dataset.num_episodes=$Trials",

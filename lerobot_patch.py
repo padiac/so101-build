@@ -130,10 +130,12 @@ def apply_exit_early_guard(verbose: bool = True) -> None:
         if episode_data is None:
             buf = getattr(getattr(self, "writer", None), "episode_buffer", None)
             if buf is not None and not buf.get("size", 0):
-                logging.warning(
-                    "[lerobot_patch] empty episode buffer, skipping save "
-                    "(no exception). Likely a stale exit_early at episode start."
-                )
+                # Not a warning. The rollout's episodic strategy saves each
+                # episode and then calls save_episode once more in a finally
+                # block, "to save any in-progress episode"; after a normal run
+                # that buffer is empty by design. Logging it as a warning made
+                # three complete, saved rollouts on 2026-10-16 look lost.
+                logging.debug("[lerobot_patch] empty episode buffer, nothing to save")
                 return
         return orig_save_episode(self, episode_data, parallel_encoding)
 
