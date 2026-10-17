@@ -119,6 +119,15 @@ param(
     # for a seventh of the smoothness is what makes closed-loop control possible
     # on this card at all. 0 leaves the checkpoint's own value alone.
     [int]$FlowSteps = 5,
+    # Denoising steps for diffusion policies, sampled with DDIM. The checkpoints
+    # are trained with DDPM and ship num_inference_steps unset, which means all
+    # 100 training timesteps: 1009 ms per plan on this card, and the arm stands
+    # still for that second at every chunk boundary before lurching onto the new
+    # plan. DDIM over the same noise schedule takes 98 ms at 10 steps, and its
+    # plans are as close to the demonstrations (2.34 against 2.22 joint units
+    # over the next 16 steps, at 12 pre-grasp moments). 0 leaves the
+    # checkpoint's DDPM-100 alone.
+    [int]$DiffusionSteps = 0,
     # -Record saves the rollout itself as a dataset: every frame the policy
     # actually saw and every action it actually issued. Without it a failed
     # run leaves nothing to examine and the next step is guesswork.
@@ -598,7 +607,14 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             else {
                 $steps = if ($FlowSteps -gt 0) { $FlowSteps } else { 10 }
                 $delayS = (75 + 35 * $steps) / 1000.0
-                $horizon = [math]::Min([int][math]::Ceiling($delayS * $Fps * 2), $chunk - 4)
+                # Never below 32. The estimate above said 250 ms at 5 flow steps,
+                # so 15 steps of horizon; on 2026-10-16 the RTC queue logged a real
+                # delay of 15-16 steps (about 530 ms) with smolvla_emptybowl130.
+                # Horizon at or under the delay is the collapse described above:
+                # the arm lunged, an elbow stalled, and the supply's overcurrent
+                # protection cut the servo bus -- twice, the second time needing
+                # the power to be unplugged. 32 is twice the delay actually seen.
+                $horizon = [math]::Min([math]::Max([int][math]::Ceiling($delayS * $Fps * 2), 32), $chunk - 4)
             }
             $rtcArgs += @("--inference.type=rtc",
                           "--inference.rtc.execution_horizon=$horizon",
@@ -607,6 +623,11 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         }
         elseif ($isFlow) {
             Write-Host "real-time chunking OFF: this policy will run $ActionSteps steps open loop" -ForegroundColor Yellow
+        }
+        if ($cfg.type -eq 'diffusion' -and $DiffusionSteps -gt 0) {
+            $rtcArgs += @("--policy.noise_scheduler_type=DDIM",
+                          "--policy.num_inference_steps=$DiffusionSteps")
+            Write-Host "diffusion sampling: DDIM $DiffusionSteps steps (checkpoint: DDPM 100)" -ForegroundColor Cyan
         }
 
         if ($ShowBox) { $env:SHOW_BLOCK_BOX = "1" } else { Remove-Item Env:SHOW_BLOCK_BOX -ErrorAction SilentlyContinue }
