@@ -389,8 +389,17 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
             --dataset.reset_time_s=$ResetTime `
             --dataset.fps=$Fps `
             --dataset.push_to_hub=false `
+            --dataset.streaming_encoding=true `
+            --dataset.encoder_threads=2 `
             --resume=$resumeFlag `
             --display_data=true
+        # streaming_encoding: encode the two videos while the episode is being
+        # recorded instead of after it. Without it every episode ended with the
+        # whole recording being written out as images and then encoded to AV1
+        # before the next one could start -- about 20 s of waiting per episode,
+        # most of an hour over 30 episodes. -Record in eval mode has used this
+        # since September; recording never did. lerobot's own record examples
+        # pass exactly these two flags.
     }
     "eval" {
         # Deploy a trained policy. NOTE: the leader arm is NOT used here -- the
