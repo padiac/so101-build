@@ -128,6 +128,9 @@ param(
     # over the next 16 steps, at 12 pre-grasp moments). 0 leaves the
     # checkpoint's DDPM-100 alone.
     [int]$DiffusionSteps = 0,
+    # Which task a multi-task checkpoint should do (names in its
+    # task_vector.json). Ignored by single-task checkpoints.
+    [string]$TaskName = "emptybowl",
     # -Record saves the rollout itself as a dataset: every frame the policy
     # actually saw and every action it actually issued. Without it a failed
     # run leaves nothing to examine and the next step is guesswork.
@@ -632,6 +635,26 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         }
         elseif ($isFlow) {
             Write-Host "real-time chunking OFF: this policy will run $ActionSteps steps open loop" -ForegroundColor Yellow
+        }
+        # Multi-task checkpoints (tools/build_multitask.py) take a one-hot task
+        # id as observation.environment_state. Which task is the operator's
+        # choice: -TaskName picks it by the names stored next to the weights.
+        Remove-Item Env:TASK_VECTOR -ErrorAction SilentlyContinue
+        if ($cfg.input_features.PSObject.Properties.Name -contains 'observation.environment_state') {
+            $tvPath = Join-Path $policyPath 'task_vector.json'
+            if (-not (Test-Path $tvPath)) {
+                Write-Host "this checkpoint needs a task id but has no task_vector.json" -ForegroundColor Red
+                exit 1
+            }
+            $names = @((Get-Content $tvPath -Raw | ConvertFrom-Json).names)
+            $idx = [array]::IndexOf($names, $TaskName)
+            if ($idx -lt 0) {
+                Write-Host "-TaskName $TaskName is not one of: $($names -join ', ')" -ForegroundColor Red
+                exit 1
+            }
+            $vec = for ($i = 0; $i -lt $names.Count; $i++) { if ($i -eq $idx) { 1 } else { 0 } }
+            $env:TASK_VECTOR = ($vec -join ',')
+            Write-Host "task id  : $TaskName  [$($env:TASK_VECTOR)]" -ForegroundColor Cyan
         }
         if ($cfg.type -eq 'diffusion' -and $DiffusionSteps -gt 0) {
             $rtcArgs += @("--policy.noise_scheduler_type=DDIM",

@@ -53,7 +53,7 @@ fi
 if [ -z "$alive" ]; then
     echo "VERDICT: DEAD -- $(grep -aE '!!!|Error|error:' "$log" | tail -2 | tr '\n' ' ')"
     script=train_emptybowl.sh
-    case "$(basename "$log")" in *smolvla*) script=train_emptybowl_smolvla.sh ;; esac
+    case "$(basename "$log")" in *smolvla*) script=train_emptybowl_smolvla.sh ;; *multitask*) script=train_multitask.sh ;; esac
     [ -n "$out" ] && echo "resume:   RESUME_OUT=$out bash /mnt/e/Repo/so101-build/tools/$script"
     exit 20
 fi

@@ -35,6 +35,12 @@ import live_task  # noqa: E402
 
 live_task.apply()
 
+# TASK_VECTOR="1,0,0" feeds a multi-task checkpoint its task id as
+# observation.environment_state on every inference (tools/build_multitask.py).
+# robot.ps1 sets it from the checkpoint's task_vector.json.
+if os.environ.get("TASK_VECTOR"):
+    lerobot_patch.apply_task_vector(os.environ["TASK_VECTOR"])
+
 from lerobot.scripts.lerobot_rollout import main  # noqa: E402
 
 if __name__ == "__main__":

@@ -318,3 +318,31 @@ def apply_mark_bad(key: str = "b", verbose: bool = True) -> None:
     ki._mark_bad_patched = True
     if verbose:
         print(f"[patch C] 录制时按 {key} 标记上一条 episode 为坏（写入 {BAD_FILE}）")
+
+
+def apply_task_vector(spec: str, key: str = "observation.environment_state", verbose: bool = True) -> None:
+    """Give a multi-task checkpoint its task id on every inference.
+
+    tools/build_multitask.py tags each training frame with a one-hot task
+    vector in observation.environment_state. The robot has no such sensor, so
+    the rollout never puts that key in the observation; without this the
+    policy's preprocessing fails on the missing input. The vector is constant
+    for the whole run -- which task to do is the operator's choice, not
+    something the scene says.
+    """
+    import numpy as np
+
+    from lerobot.rollout.inference import sync
+
+    vec = np.array([float(x) for x in spec.split(",")], dtype=np.float32)
+    orig = sync.SyncInferenceEngine.get_action
+
+    def get_action(self, obs_frame):
+        if obs_frame is not None:
+            obs_frame = dict(obs_frame)
+            obs_frame[key] = vec.copy()
+        return orig(self, obs_frame)
+
+    sync.SyncInferenceEngine.get_action = get_action
+    if verbose:
+        print(f"[lerobot_patch] task vector {vec.tolist()} -> {key}")
