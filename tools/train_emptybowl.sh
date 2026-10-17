@@ -47,7 +47,15 @@ MAX_TRIES=${MAX_TRIES:-3}
 FREE_MB=${FREE_MB:-4000}
 START_AT=${START_AT:-}
 TRIM=${TRIM:-1}
-EXCLUDE="[11]"
+# Episodes dropped before training. 11 stops a quarter of the way through;
+# 133 is 31 frames long -- a recording started by mistake. Broken recordings
+# are listed here rather than deleted from the recording itself.
+EXCLUDE=${EXCLUDE:-"[11,133]"}
+# Trim only the episodes recorded since the last preparation and merge them
+# onto the trimmed copy already there. Re-trimming everything cost 2.5 h for
+# 130 episodes, and the old ones come out identical every time. Falls back to
+# a full trim if anything about the shortcut does not check out.
+INCREMENTAL=${INCREMENTAL:-1}
 # The recording grows between runs, so the expected count is read from the
 # Windows copy rather than hard-coded; the check still catches a bad copy.
 RESIZE='[240,320]'
@@ -77,7 +85,8 @@ if [ -n "$START_AT" ]; then
 fi
 
 EXPECT_RAW=$("$V/python" -c "import json;print(json.load(open('$WIN/datasets/$SRC/meta/info.json'))['total_episodes'])")
-EXPECT_KEPT=$(( EXPECT_RAW - 1 ))
+N_EXCLUDED=$("$V/python" -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$EXCLUDE")
+EXPECT_KEPT=$(( EXPECT_RAW - N_EXCLUDED ))
 PREP=${SRC}_trim
 [ "$TRIM" = "1" ] || PREP=${SRC}_notrim
 say "=== emptybowl: $EXPECT_RAW recorded, $EXPECT_KEPT kept, TRIM=$TRIM, $STEPS steps ==="
@@ -95,14 +104,15 @@ if [ -d "$BASE/data/$PREP" ] && [ "$(count_episodes "$BASE/data/$PREP")" = "$EXP
     say "=== data already prepared, reusing it (REPREP=1 to rebuild) ==="
 else
     say "=== preparing data (CPU only) ==="
-    rm -rf "$BASE/data/${SRC}_raw" "$BASE/data/${SRC}_kept" "$BASE/data/$PREP"
+    rm -rf "$BASE/data/${SRC}_raw" "$BASE/data/${SRC}_kept" "$BASE/data/${SRC}_new" \
+           "$BASE/data/${SRC}_newtrim" "$BASE/data/${PREP}_merged"
     cp -r "$WIN/datasets/$SRC" "$BASE/data/${SRC}_raw"
     rm -rf "$BASE/data/${SRC}_raw/clips"
     n=$(count_episodes "$BASE/data/${SRC}_raw")
     say "copied: $n episodes"
     [ "$n" = "$EXPECT_RAW" ] || { say "!!! expected $EXPECT_RAW episodes, got $n"; exit 3; }
 
-    say "dropping the episode that stops a quarter of the way through: $EXCLUDE"
+    say "dropping broken episodes: $EXCLUDE"
     "$V/lerobot-edit-dataset" \
         --repo_id "local/${SRC}_raw" --root "$BASE/data/${SRC}_raw" \
         --new_repo_id "local/${SRC}_kept" --new_root "$BASE/data/${SRC}_kept" \
@@ -112,18 +122,65 @@ else
     [ "$n" = "$EXPECT_KEPT" ] || { say "!!! expected $EXPECT_KEPT after the drop, got $n"; exit 3; }
     say "after drop: $n episodes"
     rm -rf "$BASE/data/${SRC}_raw"
+    cp -f "$WIN/trim_dataset.py" "$BASE/trim_dataset.py"
 
-    if [ "$TRIM" = "1" ]; then
-        say "trimming the still head off each episode"
-        cp -f "$WIN/trim_dataset.py" "$BASE/trim_dataset.py"
-        "$V/python" "$BASE/trim_dataset.py" --src "$BASE/data/${SRC}_kept" \
-            --dst "$BASE/data/$PREP" --repo-id "local/$PREP" --force 2>&1 | tail -3 | tee -a "$LOG"
-        [ -d "$BASE/data/$PREP" ] || { say "!!! trim failed"; exit 3; }
-        rm -rf "$BASE/data/${SRC}_kept"
-    else
-        say "not trimming (TRIM=0)"
-        mv "$BASE/data/${SRC}_kept" "$BASE/data/$PREP"
+    done_prep=0
+    # Incremental only when the old trimmed copy provably holds exactly the
+    # first old_n kept episodes: it records which recording and which drop list
+    # it came from, every index it dropped is still dropped, and every newly
+    # dropped index lies past the old recording's end.
+    if [ "$TRIM" = "1" ] && [ "$INCREMENTAL" = "1" ] && [ -f "$BASE/data/$PREP/.source" ]; then
+        old_n=$(count_episodes "$BASE/data/$PREP")
+        ok=$("$V/python" -c '
+import json, sys
+src = json.load(open(sys.argv[1])); now = set(json.loads(sys.argv[2]))
+old_ex = set(src["exclude"]); old_n, kept = int(sys.argv[3]), int(sys.argv[4])
+fine = old_ex <= now and all(i >= src["raw"] for i in now - old_ex) and 0 < old_n < kept
+print("yes" if fine else "no")' "$BASE/data/$PREP/.source" "$EXCLUDE" "$old_n" "$EXPECT_KEPT")
+        if [ "$ok" = "yes" ]; then
+            say "incremental: $old_n episodes already trimmed, trimming the $(( EXPECT_KEPT - old_n )) new ones"
+            first=$("$V/python" -c "import sys;print(list(range(int(sys.argv[1]))))" "$old_n")
+            "$V/lerobot-edit-dataset" \
+                --repo_id "local/${SRC}_kept" --root "$BASE/data/${SRC}_kept" \
+                --new_repo_id "local/${SRC}_new" --new_root "$BASE/data/${SRC}_new" \
+                --operation.type delete_episodes \
+                --operation.episode_indices "$first" 2>&1 | tail -2 | tee -a "$LOG"
+            if [ "$(count_episodes "$BASE/data/${SRC}_new")" = "$(( EXPECT_KEPT - old_n ))" ] && \
+               "$V/python" "$BASE/trim_dataset.py" --src "$BASE/data/${SRC}_new" \
+                   --dst "$BASE/data/${SRC}_newtrim" --repo-id "local/${SRC}_newtrim" --force 2>&1 | tail -3 | tee -a "$LOG" && \
+               "$V/lerobot-edit-dataset" \
+                   --new_repo_id "local/$PREP" --new_root "$BASE/data/${PREP}_merged" \
+                   --operation.type merge \
+                   --operation.repo_ids "[\"local/$PREP\",\"local/${SRC}_newtrim\"]" \
+                   --operation.roots "[\"$BASE/data/$PREP\",\"$BASE/data/${SRC}_newtrim\"]" 2>&1 | tail -3 | tee -a "$LOG" && \
+               [ "$(count_episodes "$BASE/data/${PREP}_merged")" = "$EXPECT_KEPT" ]; then
+                rm -rf "$BASE/data/$PREP"
+                mv "$BASE/data/${PREP}_merged" "$BASE/data/$PREP"
+                done_prep=1
+                say "merged: $(count_episodes "$BASE/data/$PREP") episodes"
+            else
+                say "incremental path failed -- falling back to trimming everything"
+            fi
+            rm -rf "$BASE/data/${SRC}_new" "$BASE/data/${SRC}_newtrim" "$BASE/data/${PREP}_merged"
+        else
+            say "old trimmed copy does not line up with this drop list -- trimming everything"
+        fi
     fi
+
+    if [ "$done_prep" = "0" ]; then
+        rm -rf "$BASE/data/$PREP"
+        if [ "$TRIM" = "1" ]; then
+            say "trimming the still head off each episode"
+            "$V/python" "$BASE/trim_dataset.py" --src "$BASE/data/${SRC}_kept" \
+                --dst "$BASE/data/$PREP" --repo-id "local/$PREP" --force 2>&1 | tail -3 | tee -a "$LOG"
+            [ -d "$BASE/data/$PREP" ] || { say "!!! trim failed"; exit 3; }
+        else
+            say "not trimming (TRIM=0)"
+            cp -r "$BASE/data/${SRC}_kept" "$BASE/data/$PREP"
+        fi
+    fi
+    rm -rf "$BASE/data/${SRC}_kept"
+    printf '{"raw": %s, "exclude": %s}\n' "$EXPECT_RAW" "$EXCLUDE" > "$BASE/data/$PREP/.source"
     say "prepared: $(count_episodes "$BASE/data/$PREP") episodes in $PREP"
 fi
 
