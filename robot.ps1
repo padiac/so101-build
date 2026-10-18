@@ -482,6 +482,12 @@ obot.ps1 record -SkipCamCheck ..." -ForegroundColor Yellow
         $trainCfg = Join-Path $policyPath 'train_config.json'
         $homeDs = $null
         if ($HomeDataset) {
+            # Accept a bare dataset name as well as a path: "so101_emptybowl"
+            # means datasets\so101_emptybowl.
+            if (-not (Test-Path $HomeDataset)) {
+                $byName = Join-Path (Join-Path $PSScriptRoot "datasets") $HomeDataset
+                if (Test-Path $byName) { $HomeDataset = $byName }
+            }
             if (-not (Test-Path $HomeDataset)) {
                 Write-Host "-HomeDataset $HomeDataset does not exist" -ForegroundColor Red
                 exit 1
