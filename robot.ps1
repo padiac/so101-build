@@ -130,7 +130,7 @@ param(
     [int]$DiffusionSteps = 0,
     # Which task a multi-task checkpoint should do (names in its
     # task_vector.json). Ignored by single-task checkpoints.
-    [string]$TaskName = "emptybowl",
+    [string]$TaskName = "take_all_out",
     # -Record saves the rollout itself as a dataset: every frame the policy
     # actually saw and every action it actually issued. Without it a failed
     # run leaves nothing to examine and the next step is guesswork.

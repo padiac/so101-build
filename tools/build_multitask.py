@@ -29,9 +29,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 DATA = Path("/home/padiac/lerobot-train/data")
 # Order is the order of the one-hot vector; never reorder once a model exists.
 TASKS = [
-    ("emptybowl", "so101_emptybowl_trim"),   # take every cube out
-    ("take_one", "so101_color6_453_trim"),   # take one (named) cube out
-    ("put_in", "so101_v3_trim"),             # put the yellow block in
+    ("take_all_out", "so101_emptybowl_trim"),   # take every cube out of the bowl
+    ("take_one_out", "so101_color6_453_trim"),  # take one (named) cube out
+    ("put_one_in", "so101_v3_trim"),            # put the yellow block in
 ]
 OUT = "so101_multitask_trim"
 KEY = "observation.environment_state"
